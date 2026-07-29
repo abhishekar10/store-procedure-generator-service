@@ -1,7 +1,7 @@
 # RAG Stored Procedure Generator — Overview
 
 This is a planning note, not a spec. Treat everything here as a suggested starting
-point you can push back on as you build — nothing is locked in except the three
+point you can push back on as you build — nothing is locked in except the
 decisions marked "Decided" below.
 
 ## What this project demonstrates
@@ -23,10 +23,18 @@ to get evaluated closely.
 ## Decided so far
 
 - Reference schema DB is **metadata-only** (SQLite) — nothing gets executed
-  against it. SQL dialect is a per-request parameter, not tied to a real engine.
+  against it.
+- The whole project standardizes on a **single dialect: PL/pgSQL** — no
+  per-request dialect parameter or UI selector. Enterprises typically run one
+  engine per database, so this isn't a real constraint being modeled away.
+- Reference schema domain is **HR / payroll** — see
+  `03a-reference-schema-design.md`.
 - Generation output is a **single script with comment-marker sections**
   (`-- SECTION: PRE_VALIDATION`, etc.), parsed server-side into a dict for the
   frontend to render as tabs.
+- Pattern-corpus retrieval is a **deterministic per-category pull** (one
+  chunk per category, filtered by metadata), not similarity search — schema
+  retrieval stays similarity-based.
 - Orchestration uses **LangChain + langchain-google-genai**, consistent with
   `04 - Data Ingestion to Vector DB Pipeline`.
 
@@ -45,16 +53,21 @@ flowchart LR
     P --> F[React UI: tabbed sections +<br/>retrieved-context panel]
 ```
 
-## Suggested folder layout at the project root
+## Folder layout at the project root
 
 ```
 05 - RAG Project/
   planning/     <- you are here
   frontend/     <- React + JSX
   backend/      <- FastAPI + RAG pipeline
-  db/           <- schema seed scripts, sample data, migration notes
+    db/         <- schema seed scripts, sample data, migration notes
 ```
 
-Read `01-frontend.md`, `02-backend.md`, `03-db-and-rag.md`, and
-`04-genai-prompting.md` for the per-component notes. `05-open-questions.md`
-tracks things still worth deciding before or during the build.
+(`db/` was originally planned as a project-root sibling; it now lives under
+`backend/`, since it's only ever consumed by the backend. See
+`backend/README.md` for the actual layout.)
+
+Read `01-frontend.md`, `02-backend.md`, `03-db-and-rag.md` (+
+`03a-reference-schema-design.md`), and `04-genai-prompting.md` for the
+per-component notes. `05-open-questions.md` tracks things still worth
+deciding before or during the build.

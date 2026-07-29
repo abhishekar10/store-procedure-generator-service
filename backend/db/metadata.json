@@ -1,0 +1,103 @@
+{
+  "tables": {
+    "departments": {
+      "purpose": "Organizational departments that group employees and designate a managing employee.",
+      "columns": {
+        "department_id": "Primary key.",
+        "department_name": "Name of the department, e.g. Engineering, Sales.",
+        "location": "Office location the department is based in.",
+        "manager_employee_id": "Employee who heads this department. References employees.employee_id."
+      }
+    },
+    "employees": {
+      "purpose": "Employee master data: identity, job title, department, reporting line, and current employment status. The table to use for onboarding a new employee, updating their role or manager, or recording a termination.",
+      "columns": {
+        "employee_id": "Primary key.",
+        "first_name": "Employee's first name.",
+        "last_name": "Employee's last name.",
+        "email": "Unique work email address.",
+        "hire_date": "Date the employee was hired.",
+        "job_title": "Current job title.",
+        "department_id": "Department the employee belongs to. References departments.department_id.",
+        "manager_id": "Employee this person reports to. References employees.employee_id (self-referential, nullable for top-level roles).",
+        "employment_status": "One of active, on_leave, terminated.",
+        "termination_date": "Date employment ended, set only when employment_status is terminated."
+      }
+    },
+    "salary_history": {
+      "purpose": "Time-stamped record of every salary an employee has been assigned, including the initial hire salary and any subsequent raises or adjustments.",
+      "columns": {
+        "salary_id": "Primary key.",
+        "employee_id": "Employee this salary record belongs to. References employees.employee_id.",
+        "effective_date": "Date this salary took effect.",
+        "gross_monthly_salary": "Gross monthly salary amount.",
+        "currency": "Currency code for the salary amount.",
+        "reason": "Why this salary record was created: hire, raise, promotion, or adjustment."
+      }
+    },
+    "timesheets": {
+      "purpose": "Daily hours logged by employees, including overtime, subject to manager approval.",
+      "columns": {
+        "timesheet_id": "Primary key.",
+        "employee_id": "Employee who logged the hours. References employees.employee_id.",
+        "work_date": "Date the hours were worked.",
+        "hours_worked": "Regular hours worked on this date.",
+        "overtime_hours": "Overtime hours worked on this date, beyond the regular hours.",
+        "status": "One of pending, approved, rejected.",
+        "approved_by": "Employee who approved or rejected the timesheet. References employees.employee_id, nullable until reviewed."
+      }
+    },
+    "leave_requests": {
+      "purpose": "Employee requests for time off, subject to approval.",
+      "columns": {
+        "leave_id": "Primary key.",
+        "employee_id": "Employee requesting leave. References employees.employee_id.",
+        "leave_type": "One of sick, vacation, unpaid.",
+        "start_date": "First day of the requested leave.",
+        "end_date": "Last day of the requested leave.",
+        "status": "One of pending, approved, rejected."
+      }
+    },
+    "deduction_types": {
+      "purpose": "Catalog of payroll deduction types (taxes, benefits) and their default calculation rules.",
+      "columns": {
+        "deduction_type_id": "Primary key.",
+        "name": "Unique name of the deduction, e.g. federal_tax, health_insurance, retirement_401k.",
+        "calculation_type": "How the deduction is calculated: flat (fixed amount) or percentage (of gross pay).",
+        "default_value": "Default flat amount or percentage applied when an employee has no override."
+      }
+    },
+    "employee_deductions": {
+      "purpose": "Which deduction types apply to which employees, with optional per-employee overrides of the default value.",
+      "columns": {
+        "employee_deduction_id": "Primary key.",
+        "employee_id": "Employee the deduction applies to. References employees.employee_id.",
+        "deduction_type_id": "Deduction type being applied. References deduction_types.deduction_type_id.",
+        "value": "Overrides deduction_types.default_value for this employee when set; NULL means use the default.",
+        "active": "Whether this deduction is currently applied (1) or suspended (0)."
+      }
+    },
+    "payroll_runs": {
+      "purpose": "A payroll processing batch for a given pay period, tracking its overall status.",
+      "columns": {
+        "payroll_run_id": "Primary key.",
+        "pay_period_start": "First day of the pay period covered by this run.",
+        "pay_period_end": "Last day of the pay period covered by this run.",
+        "run_date": "Date the payroll run was executed.",
+        "status": "One of draft, processing, finalized, rolled_back."
+      }
+    },
+    "payroll_entries": {
+      "purpose": "Per-employee pay calculation output produced when a payroll run is processed: gross pay, total deductions, and net pay for that pay period. This is the result of running payroll, not where an employee's compensation is set up (see salary_history for that).",
+      "columns": {
+        "payroll_entry_id": "Primary key.",
+        "payroll_run_id": "Payroll run this entry belongs to. References payroll_runs.payroll_run_id.",
+        "employee_id": "Employee being paid. References employees.employee_id.",
+        "gross_pay": "Total pay before deductions for this pay period.",
+        "total_deductions": "Sum of all deductions applied for this pay period.",
+        "net_pay": "Pay after deductions: gross_pay minus total_deductions.",
+        "status": "One of calculated, paid, reversed."
+      }
+    }
+  }
+}

@@ -4,20 +4,27 @@ Suggestions only.
 
 ## Models
 
-- Generation: `gemini-2.0-flash` is probably enough for this task and keeps
-  latency low for a demo; `gemini-1.5-pro` is a fallback if section quality
-  turns out to need more reasoning depth.
-- Embeddings: `text-embedding-004` (via `langchain-google-genai`) for both the
-  schema corpus and the pattern corpus, so everything stays on one provider —
-  consistent with what's already set up from project 04.
+- Generation: `gemini-flash-latest` (an alias that tracks Google's current
+  recommended flash model rather than a pinned version) -- `gemini-2.0-flash`
+  was tried first per the original plan but returned 404 as deprecated on
+  this API key despite still appearing in `client.models.list()`, so the
+  implementation uses the alias to avoid re-breaking on the next model
+  deprecation.
+- Embeddings: `gemini-embedding-001` (via `langchain-google-genai`) for both
+  the schema corpus and the pattern corpus, so everything stays on one
+  provider — consistent with what's already set up from project 04.
+  (`text-embedding-004` isn't available on this API key/version — confirmed
+  via `client.models.list()` — so the implementation uses `gemini-embedding-001`,
+  the current stable embedding model.)
 
 ## Suggested prompt shape
 
-Roughly: system framing ("you are generating a production-grade stored
-procedure following these six sections...") + retrieved schema chunks +
-retrieved pattern chunks (one per category, per the deterministic-pull idea)
-+ the user's plain-English prompt + the selected dialect + an explicit
-instruction to emit the six `-- SECTION: X` markers in a fixed order.
+Roughly: system framing ("you are generating a production-grade PL/pgSQL
+stored procedure following these six sections...") + retrieved schema chunks
++ retrieved pattern chunks (one per category, per the deterministic-pull
+idea) + the user's plain-English prompt + an explicit instruction to emit the
+six `-- SECTION: X` markers in a fixed order. Dialect is fixed project-wide,
+so it belongs in the system framing rather than as a variable slot.
 
 Worth being explicit in the prompt that the LLM should **only reference
 tables/columns present in the retrieved schema context** — this is the main
@@ -60,7 +67,8 @@ model.
 - Whether temperature needs tuning — lower temperature is probably better
   here given the goal is consistent structural output rather than creative
   variation.
-- Dialect fidelity — spot-check that PL/pgSQL vs T-SQL syntax differences
-  (e.g., `BEGIN...EXCEPTION` vs `BEGIN TRY...BEGIN CATCH`) are actually
-  respected rather than the model defaulting to whichever dialect it has seen
-  most in training.
+- PL/pgSQL fidelity — spot-check that the model consistently uses
+  `BEGIN ... EXCEPTION ... END` for rollback (rather than drifting toward
+  T-SQL's `TRY/CATCH`, which it will have seen far more of in training) —
+  worth reinforcing with a concrete PL/pgSQL example in the retrieved pattern
+  chunk rather than relying on the system framing alone.

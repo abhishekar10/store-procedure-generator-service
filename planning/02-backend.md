@@ -47,10 +47,11 @@ what's "retrieval logic" vs "plain data access" as the pipeline grows.
   and probably a better fit here than pure similarity search, since you
   usually want *all* six pattern categories represented, not just the closest
   ones.
-- **Prompt assembly** — where the merged context + user prompt + dialect
-  instructions get combined. Isolating this in `generator.py` rather than
-  inlining it in the route handler will make it much easier to iterate on
-  prompt wording without touching route logic.
+- **Prompt assembly** — where the merged context + user prompt get combined
+  (dialect is fixed project-wide, so no per-request dialect branching needed).
+  Isolating this in `generator.py` rather than inlining it in the route
+  handler will make it much easier to iterate on prompt wording without
+  touching route logic.
 - **Section parser robustness** — the LLM might occasionally omit a section
   marker or drift on formatting. Worth deciding upfront how the parser should
   behave if a marker is missing (empty section vs. error vs. best-effort

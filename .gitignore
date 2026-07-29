@@ -1,0 +1,6 @@
+# Generated/derived, rebuildable via build_db.py and app/rag/ingest.py
+backend/db/reference.db
+backend/data/
+
+__pycache__/
+*.pyc

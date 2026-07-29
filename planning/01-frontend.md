@@ -3,11 +3,20 @@
 Suggestions only — the layout below is one reasonable way to slice it, not a
 required structure.
 
+**Superseded by an explicit direction change**: the tabbed section-viewer
+described below was the original sketch, but the actual build is a
+Claude/ChatGPT-style chat UI instead — a single scrolling thread with
+follow-up messages that revise the previous script, a regenerate button, and
+streamed responses. See `frontend/README.md` for what's actually there; the
+notes below are kept for the design reasoning that still applies (retrieved-
+context transparency, download-as-.sql, etc.) but the concrete component
+list is out of date.
+
 ## Suggested screens/components
 
-- **Prompt panel** — free-text input for the plain-English ask, plus a dialect
-  dropdown (T-SQL / PL-pgSQL / PL-SQL). Consider keeping the dropdown's default
-  sticky per session so repeat testing isn't tedious.
+- **Prompt panel** — free-text input for the plain-English ask. No dialect
+  selector needed — the project standardizes on a single dialect (PL/pgSQL),
+  so this panel is just the prompt box.
 - **Section tabs** — one tab per parsed section (Pre-Validation, Temp Tables,
   Backup, Main Script, Post-Validation, Rollback (Auto), Rollback (Manual)),
   plus a "Full Script" tab that's just the raw concatenated output for
@@ -30,22 +39,37 @@ don't need Redux/Zustand — component-local state plus a thin API client module
 should be enough. Only reach for a state library if history/session state
 starts getting passed through too many layers.
 
-## Suggested data contract with the backend
+## Data contract with the backend
 
-Not final — just illustrating the shape so frontend and backend design against
-the same thing:
+This is now the actual implemented shape (`backend/app/main.py`), not a
+sketch:
 
 ```
 POST /generate
-  body: { prompt: string, dialect: "tsql" | "plpgsql" | "plsql" }
+  body: { prompt: string }
   response: {
+    generation_id: string,
+    prompt: string,
+    full_script: string,
     sections: { pre_validation, temp_tables, backup, main_script,
                 post_validation, rollback_auto, rollback_manual },
-    full_script: string,
-    retrieved_context: [{ type: "schema" | "pattern", label: string, score: number }],
-    generation_id: string
+    retrieved_context: {
+      schema_chunks:  [{ id, text, metadata: { table_name }, score }],
+      pattern_chunks: [{ id, text, metadata: { category }, score: null }]
+    }
   }
+
+GET /schema     -> { tables: [{ table_name, purpose, columns: [...] }] }
+GET /history    -> { generations: [{ id, prompt, created_at }] }
+GET /history/{id} -> full generation record (404 if missing)
+POST /ingest    -> re-embeds schema + pattern corpus into Chroma
 ```
+
+`retrieved_context` ended up as two separate lists (schema vs. pattern)
+rather than one flat tagged list — it maps directly onto how retrieval
+actually works (similarity search vs. deterministic per-category pull), and
+the frontend can render each in its own labeled group without needing to
+filter by `type`.
 
 ## Things worth deciding before building
 

@@ -1,20 +1,14 @@
 # DB & RAG Corpus Notes
 
-Suggestions only.
+Suggestions only, except where marked Decided.
 
 ## Reference schema DB (`db/reference.db`, SQLite, metadata-only)
 
-You'll need a sample business domain to seed this with. A few options, any of
-which would work fine for demo purposes:
-
-- E-commerce (customers, orders, order_items, products, inventory, payments)
-- Banking-lite (accounts, transactions, customers, branches)
-- HR/payroll (employees, departments, salaries, timesheets)
-
-E-commerce is probably the easiest to make realistic-looking with FK chains
-that justify multi-table stored procedures (e.g., "reduce inventory and log a
-transaction when an order is placed" naturally touches 3+ tables), which gives
-the demo more interesting retrieval to show off.
+**Decided: HR / payroll domain.** Table-level detail is in
+`03a-reference-schema-design.md`. Payroll processing naturally chains
+employees → timesheets → salary history → deductions → payroll entries,
+which gives multi-table stored-procedure prompts real FK depth to justify
+pre-validation, backup, and rollback sections — not just a CRUD update.
 
 Suggested per-table metadata to store (beyond the raw DDL), since this is what
 actually gets embedded for retrieval:
@@ -23,33 +17,45 @@ actually gets embedded for retrieval:
 - FK relationships (table + column it references)
 - Maybe 1 sample row, to help the LLM understand realistic value shapes
 
+## Dialect
+
+**Decided: single dialect, PL/pgSQL, for the whole project.** No per-request
+dialect parameter, no dialect selector in the UI. This was a deliberate
+simplification — enterprises typically standardize on one engine per
+database, so a per-request dialect switch was modeling a flexibility real
+deployments don't usually need. This removes an entire axis of complexity
+from the pattern corpus, retrieval, and prompt assembly.
+
 ## Pattern corpus (`backend/app/sp_templates/`)
 
-Suggested category breakdown (matches the six output sections):
-- `pre_validation/` — existence checks, input sanity checks, permission checks
-- `temp_tables/` — staging/temp table creation + cleanup patterns
-- `backup/` — snapshotting affected rows before mutation
-- `post_validation/` — row-count assertions, referential-integrity checks
-- `rollback_auto/` — TRY/CATCH or exception-block patterns per dialect
-- `rollback_manual/` — a separate manual-invocation rollback procedure
+Suggested category breakdown (matches the six output sections), now **one
+file per category** rather than per-dialect variants, since the dialect is
+fixed:
+- `pre_validation.sql` — existence checks, input sanity checks, permission checks
+- `temp_tables.sql` — staging/temp table creation + cleanup patterns
+- `backup.sql` — snapshotting affected rows before mutation
+- `post_validation.sql` — row-count assertions, referential-integrity checks
+- `rollback_auto.sql` — `BEGIN ... EXCEPTION ... END` pattern (PL/pgSQL)
+- `rollback_manual.sql` — a separate manually-invocable rollback procedure
 
-Since the dialect is a per-request parameter rather than a fixed engine,
-consider whether each pattern file should have a version per dialect (e.g.
-`rollback_auto/tsql.sql`, `rollback_auto/plpgsql.sql`) or whether one
-dialect-agnostic description is embedded and the LLM is trusted to translate
-syntax. Per-dialect files are more work to author but reduce the risk of the
-LLM inventing incorrect syntax for a less common dialect.
+Worth authoring these against the actual HR/payroll schema (e.g., the backup
+pattern snapshots `payroll_entries` before a recalculation) rather than
+generic examples — the more concretely these tie to real tables, the more
+useful they are as few-shot grounding.
 
 ## Chroma collections
 
 Two collections keep the retrieval concerns cleanly separated:
 - `schema_chunks` — metadata: `{table_name}`
-- `pattern_templates` — metadata: `{category, dialect}`
+- `pattern_templates` — metadata: `{category}` (no `dialect` key needed now
+  that dialect is fixed project-wide)
 
-Filtering by metadata (e.g., `category == "rollback_auto"` and
-`dialect == selected_dialect`) rather than relying purely on similarity search
-is probably more reliable for the pattern corpus, given the deterministic
-per-category retrieval idea from `02-backend.md`.
+**Decided: pattern retrieval is a deterministic per-category pull** — always
+fetch exactly one chunk per category (filtered by `category` metadata) rather
+than similarity-searching the pattern corpus. Guarantees all six sections
+have grounding regardless of how the user's prompt is worded. Schema
+retrieval stays similarity-based, since which tables are relevant genuinely
+varies per prompt.
 
 ## App-state DB (`backend/data/app.db`, SQLite)
 
@@ -57,10 +63,11 @@ Kept separate from `reference.db` so "the business schema being queried" and
 "the app's own bookkeeping" don't mix. Suggested minimal table:
 
 ```
-generations(id, prompt, dialect, full_script, sections_json,
+generations(id, prompt, full_script, sections_json,
             retrieved_context_json, created_at)
 ```
 
-Simple enough to not need an ORM — direct `sqlite3` calls are probably fine at
-this scale, though SQLAlchemy is a reasonable alternative if you'd rather have
-schema migrations as the project grows.
+(No `dialect` column needed now that it's fixed.) Simple enough to not need
+an ORM — direct `sqlite3` calls are probably fine at this scale, though
+SQLAlchemy is a reasonable alternative if you'd rather have schema migrations
+as the project grows.
