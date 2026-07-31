@@ -22,11 +22,13 @@ backend/
     rag/
       ingest.py                  embeds schema + pattern chunks into Chroma
       retriever.py                schema similarity search + per-category pattern pull
-      generator.py                 prompt assembly + Gemini call
+      generator.py                 prompt assembly + Gemini call + classification gate
       section_parser.py             splits `-- SECTION: X` markers into a dict
+      validator.py                   best-effort structural SQL check
     db/
       reference_schema.py         read-only queries against db/reference.db
       conversation_store.py        chat conversations + messages (data/app.db)
+      telemetry_store.py            per-request metrics (data/app.db)
     sp_templates/                the authored pattern library (source docs for the pattern corpus)
   db/
     schema.sql                  reference schema DDL (9 tables)
@@ -35,8 +37,11 @@ backend/
     build_db.py                      builds db/reference.db from the two files above
     reference.db                      the built SQLite database (generated, gitignored)
   data/
-    app.db                     conversations + messages (generated, gitignored)
+    app.db                     conversations + messages + telemetry (generated, gitignored)
     vector_store/                Chroma persistent store (generated, gitignored)
+  tests/                      fast, offline unit tests (no API calls) -- default `pytest` run
+  evals/                       RAG quality evals (live API calls) -- run explicitly with `pytest evals/`
+  pytest.ini
   requirements.txt
 ```
 
@@ -107,6 +112,7 @@ Raw OpenAPI schema: http://127.0.0.1:8000/api/openapi.json
 | DELETE | `/conversations/{id}`      | Delete a conversation and its messages (404 if missing)                     |
 | GET    | `/schema`                  | Reference schema tables/columns                                             |
 | POST   | `/ingest`                  | Re-embeds the schema + pattern corpus into Chroma                            |
+| GET    | `/metrics`                 | Aggregate telemetry: acceptance rate, latency per stage, output validity      |
 
 A `conversation_id` of `null` starts a new conversation; the response/stream
 returns the generated id, which the frontend then reuses for follow-up
@@ -122,9 +128,14 @@ Every request first passes a classification gate (`classify_request` in
 prompt is actually asking for a database stored procedure at all. Prompts
 like "write a python program to add two numbers" get rejected before any
 retrieval or generation happens, rather than producing an irrelevant script.
-A rejected request still gets persisted (as an assistant message with
-`kind: "rejected"`, `content` holding the reason) so the conversation history
-shows why nothing was generated.
+The gate is passed the prior conversation's user messages (not just the
+latest one), so a short follow-up like "make it handle nulls too" is judged
+in context rather than in isolation -- an earlier version only saw the
+latest message and incorrectly rejected legitimate follow-ups; see
+`evals/test_classifier_eval.py` for the regression cases that guard against
+that coming back. A rejected request still gets persisted (as an assistant
+message with `kind: "rejected"`, `content` holding the reason) so the
+conversation history shows why nothing was generated.
 
 `POST /generate` response shape when the request passes the gate
 (`/generate/stream`'s final `done` SSE event carries the same fields, plus
@@ -202,6 +213,53 @@ balanced parentheses, balanced `$$` dollar-quoted blocks, and all seven
 sections present and non-empty. It is not a real SQL parser -- it catches
 the kinds of malformed output an LLM occasionally produces, not genuine
 PL/pgSQL correctness.
+
+## Telemetry & metrics
+
+Every `/generate` and `/generate/stream` call logs one row to
+`telemetry_events` in `data/app.db` (`app/db/telemetry_store.py`) --
+whether it was accepted or rejected, latency broken down per pipeline stage
+(classification / retrieval / generation), which tables got retrieved, and
+whether the output passed the structural validator. `GET /metrics` returns
+the aggregate: acceptance/rejection rate, average latency per stage,
+`sql_valid` rate, and the most-frequently-retrieved tables.
+
+This is intentionally basic -- no tracing, no percentiles, no alerting, no
+external tool (no OpenTelemetry/Prometheus/Datadog). It answers "is this
+working, and roughly how well" from inside the codebase, which is enough to
+know the fundamentals of what production monitoring for a RAG system needs
+to capture, without pulling in infrastructure this project doesn't need yet.
+
+```bash
+curl http://127.0.0.1:8000/metrics
+```
+
+## Testing & evals
+
+Two separate layers, on purpose -- they test different things and have very
+different costs:
+
+- **`tests/`** -- fast, deterministic, offline unit tests (no network, no API
+  key required). Covers `section_parser`, `validator`, `conversation_store`
+  (including a regression test for a foreign-key-ordering bug that
+  previously made `DELETE /conversations/{id}` 500), and `telemetry_store`'s
+  aggregation math. This is what `pytest` runs by default.
+- **`evals/`** -- RAG *quality* evals against a small golden set, calling the
+  real Gemini API (real cost, ~30s total). `test_classifier_eval.py` checks
+  the classification gate's accuracy on a labeled set of on-topic/off-topic
+  prompts and context-dependent follow-ups (including the exact cases that
+  were misclassified before the gate was made context-aware).
+  `test_retrieval_eval.py` checks schema-retrieval recall against the four
+  candidate prompts documented in `planning/03a-reference-schema-design.md`,
+  with thresholds set as regression canaries, not a claim that retrieval is
+  perfect -- see the retrieval precision limitation noted in
+  `06 - Interview Questions/00-review-findings.md`.
+
+```bash
+cd "05 - RAG Project/backend"
+python3 -m pytest              # fast unit tests only (~0.05s)
+python3 -m pytest evals/       # live-API evals (~30s, costs real tokens)
+```
 
 ## Models
 

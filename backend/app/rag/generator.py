@@ -14,16 +14,21 @@ from app.rag.validator import validate_script
 CLASSIFIER_PROMPT = """You are a gatekeeper for a tool that only generates PostgreSQL \
 (PL/pgSQL) stored procedures for an HR/payroll database.
 
-Decide whether the request below is asking for a database stored procedure, a SQL \
-script, or a data/business operation that could reasonably be implemented as one \
-(e.g. "calculate late fees for overdue timesheets" counts; "write a python function \
-to add two numbers", "tell me a joke", and general chit-chat do not).
+Decide whether the LATEST user message below is asking for a database stored \
+procedure, a SQL script, or a data/business operation that could reasonably be \
+implemented as one -- either on its own, or as a follow-up refinement of an \
+already-established stored-procedure conversation (e.g. "make it handle nulls \
+too" or "what about weekends and holidays" are valid follow-ups if the \
+conversation so far is about a stored procedure -- judge them in that context, \
+not in isolation). Reject only messages that are clearly unrelated to a database \
+operation even in context (e.g. "write a python function to add two numbers", \
+"tell me a joke", general chit-chat).
+{conversation_block}
+Latest user message: "{user_prompt}"
 
 Respond with exactly two lines, nothing else:
 ANSWER: YES or NO
 REASON: one short sentence explaining why
-
-Request: "{user_prompt}"
 """
 
 _ANSWER_RE = re.compile(r"ANSWER:\s*(YES|NO)", re.IGNORECASE)
@@ -120,13 +125,26 @@ def _build_llm() -> ChatGoogleGenerativeAI:
     return ChatGoogleGenerativeAI(model=config.GENERATION_MODEL, google_api_key=config.GEMINI_API_KEY, temperature=0.2)
 
 
-def classify_request(user_prompt: str) -> tuple[bool, str]:
+def _format_classifier_conversation_block(prior_messages: list[dict] | None) -> str:
+    prior_user_texts = [m["content"] for m in (prior_messages or []) if m["role"] == "user"]
+    if not prior_user_texts:
+        return ""
+    transcript = "\n".join(f"- {text}" for text in prior_user_texts)
+    return f"\nConversation so far (earlier user messages):\n{transcript}\n"
+
+
+def classify_request(user_prompt: str, prior_messages: list[dict] | None = None) -> tuple[bool, str]:
     """A small, fast gate that runs before retrieval/generation: rejects
     requests that aren't actually asking for a database stored procedure
     (e.g. "write a python program to add two numbers"), rather than
-    generating an irrelevant script anyway."""
+    generating an irrelevant script anyway. Prior user messages are included
+    so a short follow-up ("make it handle nulls too") is judged in the
+    context of an already-established stored-procedure conversation, not in
+    isolation."""
     llm = ChatGoogleGenerativeAI(model=config.GENERATION_MODEL, google_api_key=config.GEMINI_API_KEY, temperature=0)
-    response_text = _extract_text(llm.invoke(CLASSIFIER_PROMPT.format(user_prompt=user_prompt)).content)
+    conversation_block = _format_classifier_conversation_block(prior_messages)
+    prompt = CLASSIFIER_PROMPT.format(conversation_block=conversation_block, user_prompt=user_prompt)
+    response_text = _extract_text(llm.invoke(prompt).content)
 
     answer_match = _ANSWER_RE.search(response_text)
     reason_match = _REASON_RE.search(response_text)
@@ -161,7 +179,7 @@ def _finalize(user_prompt: str, full_script: str, context: dict[str, list[Retrie
 
 
 def generate_stored_procedure(user_prompt: str, prior_messages: list[dict] | None = None, top_k: int = 5) -> dict:
-    is_valid, reason = classify_request(user_prompt)
+    is_valid, reason = classify_request(user_prompt, prior_messages)
     if not is_valid:
         raise RequestRejected(reason)
 
@@ -177,7 +195,7 @@ def stream_stored_procedure(user_prompt: str, prior_messages: list[dict] | None 
     single {"type": "rejected", "reason": ...} in place of all of the above
     if the request doesn't pass the classification gate."""
     yield {"type": "status", "stage": "checking_request"}
-    is_valid, reason = classify_request(user_prompt)
+    is_valid, reason = classify_request(user_prompt, prior_messages)
     if not is_valid:
         yield {"type": "rejected", "reason": reason}
         return

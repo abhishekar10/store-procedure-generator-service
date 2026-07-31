@@ -2,6 +2,7 @@
 chat conversation storage."""
 
 import json
+import time
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +19,7 @@ from app.db.conversation_store import (
     list_conversations,
 )
 from app.db.reference_schema import list_tables
+from app.db.telemetry_store import get_metrics_summary, log_event
 from app.rag.generator import RequestRejected, generate_stored_procedure, stream_stored_procedure
 from app.rag.ingest import run_ingest
 from app.rag.retriever import serialize_context
@@ -67,6 +69,7 @@ def _sse(event: str, data: dict) -> str:
 def generate(request: GenerateRequest):
     conversation_id = request.conversation_id
     prior_messages = _prior_messages_for(conversation_id)
+    start_time = time.monotonic()
 
     if conversation_id is None:
         conversation_id = create_conversation(request.prompt)
@@ -76,6 +79,15 @@ def generate(request: GenerateRequest):
         result = generate_stored_procedure(request.prompt, prior_messages=prior_messages)
     except RequestRejected as exc:
         message_id = add_rejected_message(conversation_id, exc.reason)
+        log_event(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            prompt=request.prompt,
+            is_regenerate=False,
+            accepted=False,
+            rejection_reason=exc.reason,
+            total_latency_ms=(time.monotonic() - start_time) * 1000,
+        )
         return {
             "conversation_id": conversation_id,
             "message_id": message_id,
@@ -90,6 +102,21 @@ def generate(request: GenerateRequest):
         full_script=result["full_script"],
         sections=result["sections"],
         retrieved_context=retrieved_context,
+        sql_valid=result["sql_valid"],
+        sql_issues=result["sql_issues"],
+    )
+    log_event(
+        conversation_id=conversation_id,
+        message_id=message_id,
+        prompt=request.prompt,
+        is_regenerate=False,
+        accepted=True,
+        retrieved_tables=[
+            {"table_name": chunk["metadata"]["table_name"], "score": chunk["score"]}
+            for chunk in retrieved_context["schema_chunks"]
+        ],
+        pattern_count=len(retrieved_context["pattern_chunks"]),
+        total_latency_ms=(time.monotonic() - start_time) * 1000,
         sql_valid=result["sql_valid"],
         sql_issues=result["sql_issues"],
     )
@@ -139,10 +166,22 @@ def generate_stream(request: StreamRequest):
         add_user_message(conversation_id, user_prompt)
 
     def event_stream():
+        overall_start = time.monotonic()
+        stage_start = overall_start
+        stage_latencies_ms: dict[str, float] = {}
+        current_stage = None
+
+        def close_current_stage() -> None:
+            if current_stage is not None:
+                stage_latencies_ms[current_stage] = (time.monotonic() - stage_start) * 1000
+
         yield _sse("start", {"conversation_id": conversation_id})
         try:
             for event in stream_stored_procedure(user_prompt, prior_messages=prior_messages):
                 if event["type"] == "status":
+                    close_current_stage()
+                    stage_start = time.monotonic()
+                    current_stage = event["stage"]
                     yield _sse("status", {"stage": event["stage"]})
                     continue
 
@@ -151,19 +190,49 @@ def generate_stream(request: StreamRequest):
                     continue
 
                 if event["type"] == "rejected":
+                    close_current_stage()
                     message_id = add_rejected_message(conversation_id, event["reason"])
+                    log_event(
+                        conversation_id=conversation_id,
+                        message_id=message_id,
+                        prompt=user_prompt,
+                        is_regenerate=request.is_regenerate,
+                        accepted=False,
+                        rejection_reason=event["reason"],
+                        classify_latency_ms=stage_latencies_ms.get("checking_request"),
+                        total_latency_ms=(time.monotonic() - overall_start) * 1000,
+                    )
                     yield _sse(
                         "rejected",
                         {"conversation_id": conversation_id, "message_id": message_id, "reason": event["reason"]},
                     )
                     return
 
+                close_current_stage()
                 retrieved_context = serialize_context(event["retrieved_context"])
                 message_id = add_assistant_message(
                     conversation_id,
                     full_script=event["full_script"],
                     sections=event["sections"],
                     retrieved_context=retrieved_context,
+                    sql_valid=event["sql_valid"],
+                    sql_issues=event["sql_issues"],
+                )
+                log_event(
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    prompt=user_prompt,
+                    is_regenerate=request.is_regenerate,
+                    accepted=True,
+                    retrieved_tables=[
+                        {"table_name": chunk["metadata"]["table_name"], "score": chunk["score"]}
+                        for chunk in retrieved_context["schema_chunks"]
+                    ],
+                    pattern_count=len(retrieved_context["pattern_chunks"]),
+                    classify_latency_ms=stage_latencies_ms.get("checking_request"),
+                    retrieval_latency_ms=stage_latencies_ms.get("retrieving_context"),
+                    generation_latency_ms=stage_latencies_ms.get("drafting_script"),
+                    total_latency_ms=(time.monotonic() - overall_start) * 1000,
                     sql_valid=event["sql_valid"],
                     sql_issues=event["sql_issues"],
                 )
@@ -180,6 +249,15 @@ def generate_stream(request: StreamRequest):
                     },
                 )
         except Exception as exc:  # noqa: BLE001 -- surfaced to the client as an SSE error event
+            log_event(
+                conversation_id=conversation_id,
+                message_id=None,
+                prompt=user_prompt,
+                is_regenerate=request.is_regenerate,
+                accepted=False,
+                error_message=str(exc),
+                total_latency_ms=(time.monotonic() - overall_start) * 1000,
+            )
             yield _sse("error", {"message": str(exc)})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -222,3 +300,12 @@ def get_schema():
 def ingest():
     run_ingest()
     return {"status": "ok"}
+
+
+@app.get(
+    "/metrics",
+    tags=["Admin"],
+    summary="Basic aggregate telemetry: acceptance rate, latency per pipeline stage, output validity",
+)
+def get_metrics():
+    return get_metrics_summary()
