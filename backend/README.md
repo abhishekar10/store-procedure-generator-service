@@ -248,9 +248,9 @@ trace or upstream payload. Codes are stable; messages may change.
 **Timeouts and retries** (`app/rag/llm.py`). All Gemini clients -- the
 classifier, generation and embeddings -- are built in one place. The
 classifier (20s) and embeddings (20s) use the client library's own retry, 3
-attempts. Generation (300s, above the observed 232s worst case) does not:
-that retry also fires after a timeout, which would turn one 300s timeout
-into several. Generation retries once, and only a 429/500/502/503 that
+attempts. Generation (200s; ~15s at thinking level `low`, up to ~160s at
+`auto`) does not: that retry also fires after a timeout, which would turn
+one 200s timeout into several. Generation retries once, and only a 429/500/502/503 that
 arrived within 30s of the attempt starting; a stream is retried only before
 any text has been sent. All of these are environment variables (see
 `app/config.py`).
@@ -264,8 +264,8 @@ golden scripts still compiled and ran against the seed data in Postgres.
 The model alias floats, so if a future model rejects the level with a 400,
 logs a `thinking_level_rejected` warning, retries at once without
 it, and stays on the model default for that model until restart -- slower,
-but not failing. The 300s timeout is kept because `auto`, or that fallback,
-still takes minutes.
+but not failing. The 200s generation timeout is sized for `auto`, or that
+fallback, which still takes minutes.
 
 The classifier has its own setting, `CLASSIFIER_THINKING_LEVEL` (default
 `low`, same values and the same fallback). Over 23 scenarios run 3 times each

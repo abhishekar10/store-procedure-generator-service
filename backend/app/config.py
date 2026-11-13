@@ -83,15 +83,17 @@ class Settings(BaseSettings):
     app_db_path: Path = BACKEND_DIR / "data" / "app.db"
 
     # --- upstream timeouts and retries -----------------------------------
-    # Measured: generation takes 44-232s end to end (MIGRATION_STATUS 4.1),
-    # so its timeout sits above the observed worst case. The classifier and
-    # embeddings are short calls (~5s and <1s).
+    # Generation takes 11-16s at thinking level "low". 200s is headroom for
+    # "auto" and for the fallback when a model rejects the level: those took
+    # 39-162s on the golden prompts (one earlier outlier reached 232s, and
+    # would now time out). The classifier and embeddings are short calls
+    # (~2.5s and <1s).
     classifier_timeout_s: float = Field(default=20, gt=0)
     embedding_timeout_s: float = Field(default=20, gt=0)
-    generation_timeout_s: float = Field(default=300, gt=0)
+    generation_timeout_s: float = Field(default=200, gt=0)
     # Attempts include the first call. Short calls use the client library's
     # own retry (408/429/5xx and timeouts). Generation does not: that retry
-    # also fires after a timeout, which would turn one 300s timeout into
+    # also fires after a timeout, which would turn one 200s timeout into
     # several. Generation retries only fast 429/5xx failures (see generator).
     classifier_attempts: int = Field(default=3, ge=1, le=5)
     embedding_attempts: int = Field(default=3, ge=1, le=5)

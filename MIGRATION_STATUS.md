@@ -263,7 +263,7 @@ What was built:
 
 - **`app/rag/llm.py`** builds every Gemini client (classifier, generation, embeddings
   for both retrieval and ingest). Classifier/embeddings: 20s timeout, library retry, 3
-  attempts. Generation: 300s timeout, library retry off, own retry — once, only on
+  attempts. Generation: 200s timeout (300s until the thinking-level change), library retry off, own retry — once, only on
   429/500/502/503, only if the attempt failed within 30s; streams only before any text
   was sent; plus an overall stream deadline. **Deviation from the plan:** langchain's
   `.with_retry()` filters by exception *type* only, so it cannot tell a 429 from a 400
@@ -322,7 +322,7 @@ Verified:
 
 ## 4. Measurements that constrain the remaining work
 
-### 4.1 Generation takes 44–232 seconds
+### 4.1 Generation took 44–232 seconds (now ~15s at thinking level `low`)
 
 Measured repeatedly. Telemetry from live runs: `avg_generation_latency_ms = 171,722`;
 classifier ~4.7s, retrieval ~0.6s, generation ~172s.
@@ -337,8 +337,10 @@ all of it silent reasoning before the first token. `GENERATION_THINKING_LEVEL`
 now defaults to `low`: 11–16s per generation on the golden prompts instead of
 39–162s, with every script still compiling and running in Postgres (4 prompts,
 one run — see README "Thinking level"). The constraints below still hold for
-`auto` and for the fallback when a model rejects the level, so the 300s
-timeouts are unchanged; with `low` they are headroom rather than a squeeze.
+`auto` and for the fallback when a model rejects the level. The generation
+timeout was then lowered from 300s to 200s (owner's call): enough for `auto` on
+the golden prompts (39–162s), though the one 232s outlier seen earlier would
+now time out.
 `CLASSIFIER_THINKING_LEVEL` (also `low`) takes the classifier from ~3.9s to
 ~2.4s median with identical answers over 23 scenarios × 3 runs.
 
@@ -492,10 +494,11 @@ S3 + CloudFront for the UI. Public subnets plus security groups, **no NAT gatewa
 
 **`idle_timeout = 300` on the ALB is the single most important setting here.** See 4.1.
 Since Phase 2 the streaming path sends a heartbeat every 15s, so it no longer depends on
-the idle timeout. Non-streaming `/generate` still does: its worst case is classifier
-(~65s with retries) + retrieval + generation (300s timeout), which can exceed 300s. Either
-raise `idle_timeout` to ~420s or accept that `/generate` can be cut — **owner's call;
-flagged, not changed.** Also set the ECS task `stopTimeout = 120` (above
+the idle timeout. Non-streaming `/generate` still does. With the generation timeout at
+200s, a typical request is ~15s and even an `auto`-level one fits inside 300s; only the
+pathological case (classifier and embeddings both exhausting their retries, ~65s each,
+and then a slow generation) could pass it. **`idle_timeout = 300` is therefore enough;
+the earlier ~420s suggestion is withdrawn.** Also set the ECS task `stopTimeout = 120` (above
 `GRACEFUL_SHUTDOWN_S = 110`) and ALB `deregistration_delay` to ~120s, or deploys will cut
 in-flight generations sooner than they need to.
 
@@ -543,9 +546,9 @@ Pass it with `--secret id=gemini_key,env=GEMINI_API_KEY`, never as a build ARG.
 
 ## 8. State right now
 
-- **2 commits are local and unpushed** (`f27b99f`, `9377c71`). There are no git
-  credentials configured on this machine — no helper, no `~/.git-credentials`, no SSH
-  keys — so push from VS Code's source control panel, not the CLI.
+- Phases 0–2 and the thinking-level change are pushed to `origin/main`. There are no
+  git credentials configured on this machine — no helper, no `~/.git-credentials`, no
+  SSH keys — so the owner pushes from VS Code's source control panel, not the CLI.
 - **`aws configure` has not been run.** Region and credentials are unset. Needed before
   Phase 5, not before.
 - The compose stack may still be running (`docker compose ps`). `docker compose down`
