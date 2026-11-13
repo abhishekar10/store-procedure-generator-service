@@ -3,80 +3,26 @@
 - pattern chunks via a deterministic pull of one chunk per category
 """
 
-import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 
-import chromadb
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
+from app import adapters
+from app.adapters.base import RetrievedChunk
 from app.config import PATTERN_CATEGORIES, get_settings
-from app.rag.llm import build_embeddings
-
-
-@dataclass
-class RetrievedChunk:
-    id: str
-    text: str
-    metadata: dict
-    score: float | None = None
-
-
-_client: chromadb.ClientAPI | None = None
-_client_lock = threading.Lock()
-
-
-def _get_client() -> chromadb.ClientAPI:
-    """One Chroma client per process. Creating PersistentClients concurrently
-    from several threads races inside chromadb's shared-system setup ("Could
-    not connect to tenant default_tenant") -- reproduced with four parallel
-    generations -- and FastAPI runs sync handlers on a threadpool."""
-    global _client
-    with _client_lock:
-        if _client is None:
-            _client = chromadb.PersistentClient(path=str(get_settings().vector_store_dir))
-        return _client
-
-
-def _get_embeddings() -> GoogleGenerativeAIEmbeddings:
-    return build_embeddings()
 
 
 def retrieve_schema_chunks(prompt: str, top_k: int | None = None) -> list[RetrievedChunk]:
     settings = get_settings()
     top_k = settings.retrieval_top_k if top_k is None else top_k
-    collection = _get_client().get_collection(settings.schema_collection)
-    query_embedding = _get_embeddings().embed_query(prompt, task_type="retrieval_query")
-
-    results = collection.query(query_embeddings=[query_embedding], n_results=top_k)
-
-    return [
-        RetrievedChunk(id=id_, text=document, metadata=metadata, score=distance)
-        for id_, document, metadata, distance in zip(
-            results["ids"][0],
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
-            strict=True,
-        )
-    ]
+    vector = adapters.llm_provider().embed_query(prompt)
+    return adapters.vector_store().query(settings.schema_collection, vector, top_k)
 
 
 def retrieve_pattern_chunks() -> list[RetrievedChunk]:
     """Returns exactly one chunk per category, in a fixed order -- every
     generation gets grounding for all seven sections regardless of prompt
     wording, so this is a direct lookup rather than a similarity search."""
-    collection = _get_client().get_collection(get_settings().pattern_collection)
-
     ids = [f"pattern::{category}" for category in PATTERN_CATEGORIES]
-    results = collection.get(ids=ids)
-
-    chunks_by_id = {
-        id_: RetrievedChunk(id=id_, text=document, metadata=metadata)
-        for id_, document, metadata in zip(
-            results["ids"], results["documents"], results["metadatas"], strict=True
-        )
-    }
-    return [chunks_by_id[chunk_id] for chunk_id in ids]
+    return adapters.vector_store().get(get_settings().pattern_collection, ids)
 
 
 def retrieve_context(prompt: str, top_k: int | None = None) -> dict[str, list[RetrievedChunk]]:
@@ -95,15 +41,10 @@ def serialize_context(context: dict[str, list[RetrievedChunk]]) -> dict[str, lis
 def check_collections() -> dict[str, int | None]:
     """Reports how many chunks each collection holds, for the readiness probe.
 
-    Reads the local Chroma store only -- no embeddings call, so it needs no
+    Reads the local vector store only -- no embeddings call, so it needs no
     API key and costs nothing. A value of None means the collection could not
     be opened at all.
     """
     settings = get_settings()
-    counts: dict[str, int | None] = {}
-    for name in (settings.schema_collection, settings.pattern_collection):
-        try:
-            counts[name] = _get_client().get_collection(name).count()
-        except Exception:  # noqa: BLE001 -- any failure here just means "not ready"
-            counts[name] = None
-    return counts
+    store = adapters.vector_store()
+    return {name: store.count(name) for name in (settings.schema_collection, settings.pattern_collection)}

@@ -26,8 +26,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app import adapters
 from app.config import Settings, get_settings
-from app.db.reference_schema import list_tables
 from app.errors import ServiceError, error_body, to_service_error
 from app.middleware import RequestContextMiddleware
 from app.observability import configure_logging, emit_generation_metrics, request_id_var
@@ -130,7 +130,7 @@ def ready(response: Response):
     checks: dict[str, object] = {}
 
     checks["config"] = bool(settings.gemini_api_key)
-    checks["reference_db"] = settings.reference_db_path.is_file()
+    checks["reference_db"] = adapters.schema_source().available()
 
     collections = check_collections()
     checks["collections"] = collections
@@ -436,7 +436,25 @@ def generate_stream(request: GenerateRequest):
 
 @v1.get("/schema", tags=["Reference Schema"], summary="List reference schema tables and columns")
 def get_schema():
-    return {"tables": list_tables()}
+    return {
+        "tables": [
+            {
+                "table_name": table.name,
+                "purpose": table.purpose,
+                "columns": [
+                    {
+                        "name": column.name,
+                        "type": column.type,
+                        "primary_key": column.primary_key,
+                        "not_null": column.not_null,
+                        "description": column.description,
+                    }
+                    for column in table.columns
+                ],
+            }
+            for table in adapters.schema_source().tables()
+        ]
+    }
 
 
 app.include_router(v1)

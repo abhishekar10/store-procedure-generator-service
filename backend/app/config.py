@@ -61,13 +61,20 @@ class Settings(BaseSettings):
     # 39-162s; "low" took 11-16s, and every script still compiled and ran
     # against the seed data in Postgres. "low" is the default. If the model
     # the alias points to rejects the setting, generation falls back to auto
-    # (see app/rag/llm.py) rather than failing.
+    # (see app/adapters/gemini.py) rather than failing.
     generation_thinking_level: Literal["auto", "low", "medium", "high"] = "low"
     # The same for the request classifier. Measured over 23 scenarios x 3 runs
     # (on/off-topic, follow-ups, typos, Hinglish, prompt injection): auto and
     # low gave identical answers on every run; low cut the median from 3.9s
     # to 2.4s and the worst case from 17.4s to 5.7s.
     classifier_thinking_level: Literal["auto", "low", "medium", "high"] = "low"
+
+    # --- adapters (app/adapters) -------------------------------------------
+    # Which implementation backs each seam. One of each exists today; these
+    # are where a second one would be selected.
+    llm_provider: Literal["gemini"] = "gemini"
+    vector_store: Literal["chroma"] = "chroma"
+    schema_source: Literal["sqlite"] = "sqlite"
 
     # --- retrieval -------------------------------------------------------
     retrieval_top_k: int = Field(default=5, ge=1, le=25)

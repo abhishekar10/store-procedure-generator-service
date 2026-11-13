@@ -1,4 +1,5 @@
-"""The one place Gemini clients are built, with timeouts and retries.
+"""LLMProvider over Gemini: the one place Gemini clients are built, with
+timeouts, library retries and the thinking level.
 
 Measured against a local server that accepts connections and never answers:
 
@@ -22,26 +23,19 @@ slows requests down instead of failing all of them.
 """
 
 import logging
-import time
-from collections.abc import Callable
-from typing import Literal
+from collections.abc import Callable, Iterator
 
 from google.genai import Client
 from google.genai import errors as genai_errors
 from google.genai.types import HttpOptions, HttpRetryOptions
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
+from app.adapters.base import Purpose
 from app.config import get_settings
-from app.errors import find_in_chain, upstream_status
+from app.errors import find_in_chain
 
 logger = logging.getLogger(__name__)
 
-# Failures worth one more try: quota (429) and transient server errors.
-# Deliberately not 408/504 or client-side timeouts -- for generation those
-# mean the call already ran for minutes, and a retry would double that.
-RETRYABLE_GENERATION_STATUS = frozenset({429, 500, 502, 503})
-
-Purpose = Literal["classify", "generate"]
 
 # (model, thinking level) pairs Gemini has refused with a 400. Keyed by level
 # as well as model: a model that rejects "high" may still accept "low".
@@ -122,43 +116,45 @@ def build_embeddings() -> GoogleGenerativeAIEmbeddings:
     return embeddings
 
 
-def is_retryable_generation_error(exc: BaseException) -> bool:
-    return upstream_status(exc) in RETRYABLE_GENERATION_STATUS
-
-
-def should_retry_generation(exc: BaseException, *, attempt: int, attempts: int, elapsed_s: float) -> bool:
-    """Retry only a failure that is retryable (429/5xx) AND fast: within the
-    retry window of the attempt starting. A generation that failed after
-    minutes of work is not retried -- the caller would wait twice as long
-    for what is probably the same outcome."""
-    retry = (
-        attempt < attempts
-        and elapsed_s <= get_settings().generation_retry_window_s
-        and is_retryable_generation_error(exc)
+def _text(content: str | list) -> str:
+    """ChatGoogleGenerativeAI returns `.content` as a plain string for some
+    models and as a list of content blocks (text/thinking/etc.) for others --
+    normalize both into a single string."""
+    if isinstance(content, str):
+        return content
+    return "".join(
+        block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
     )
-    if retry:
-        logger.warning(
-            "generation.retry",
-            extra={"attempt": attempt, "upstream_status": upstream_status(exc), "elapsed_ms": round(elapsed_s * 1000)},
-        )
-    return retry
 
 
-def call_with_retry[T](
-    call: Callable[[], T],
-    *,
-    attempts: int,
-    clock: Callable[[], float] = time.monotonic,
-) -> T:
-    attempt = 1
-    while True:
-        started = clock()
+class GeminiProvider:
+    """Stateless: clients are built per call from the current settings,
+    which is what lets the thinking-level fallback take effect at once."""
+
+    def complete(self, prompt: str, purpose: Purpose) -> str:
+        return with_thinking_fallback(lambda: _text(build_chat_model(purpose).invoke(prompt).content), purpose)
+
+    def stream(self, prompt: str, purpose: Purpose) -> Iterator[str]:
+        emitted = False
         try:
-            return call()
+            for chunk in build_chat_model(purpose).stream(prompt):
+                text = _text(chunk.content)
+                if text:
+                    emitted = True
+                    yield text
         except Exception as exc:
-            if disable_thinking_if_rejected(exc, "generate"):
-                continue  # not a failed attempt: retry at once, without the setting
-            if not should_retry_generation(exc, attempt=attempt, attempts=attempts, elapsed_s=clock() - started):
+            # A refused thinking level arrives before any text. Once it is
+            # disabled the retry builds without it, and a second refusal is
+            # no longer recognised as one, so this recurses at most once.
+            if emitted or not disable_thinking_if_rejected(exc, purpose):
                 raise
-            time.sleep(get_settings().generation_retry_backoff_s * attempt)
-            attempt += 1
+            yield from self.stream(prompt, purpose)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return build_embeddings().embed_documents(texts, task_type="retrieval_document")
+
+    def embed_query(self, text: str) -> list[float]:
+        return build_embeddings().embed_query(text, task_type="retrieval_query")
+
+    def log_fields(self, purpose: Purpose) -> dict:
+        return {"model": get_settings().generation_model, "thinking_level": thinking_level(purpose) or "auto"}

@@ -2,10 +2,10 @@
 validation, typed errors, retries, rate limiting, request IDs, SSE heartbeat
 and error shape.
 
-Both LLM sites are faked through `app.rag.generator._build_llm` (the
-classifier and generation both build their client there), and retrieval
-through `app.rag.generator.retrieve_context`, so nothing here makes a
-network call or needs a vector store.
+The LLM provider is faked through `app.adapters.llm_provider` (classifier
+and generation both get their provider there), and retrieval through
+`app.rag.generator.retrieve_context`, so nothing here makes a network call or
+needs a vector store.
 """
 
 import json
@@ -72,9 +72,9 @@ class FakeLLM:
             raise outcome
         return outcome
 
-    def invoke(self, prompt):
+    def complete(self, prompt):
         outcome = self._next(prompt)
-        return SimpleNamespace(content=outcome if isinstance(outcome, str) else "".join(outcome))
+        return outcome if isinstance(outcome, str) else "".join(outcome)
 
     def stream(self, prompt):
         outcome = self._next(prompt)
@@ -83,7 +83,23 @@ class FakeLLM:
         for piece in [outcome] if isinstance(outcome, str) else outcome:
             if isinstance(piece, BaseException):
                 raise piece
-            yield SimpleNamespace(content=piece)
+            yield piece
+
+
+class FakeProvider:
+    """An LLMProvider that routes each purpose to its own FakeLLM."""
+
+    def __init__(self, llms):
+        self.llms = llms
+
+    def complete(self, prompt, purpose):
+        return self.llms[purpose].complete(prompt)
+
+    def stream(self, prompt, purpose):
+        yield from self.llms[purpose].stream(prompt)
+
+    def log_fields(self, purpose):
+        return {"model": "fake"}
 
 
 @pytest.fixture
@@ -95,7 +111,7 @@ def api(monkeypatch):
     main._limiter = None
 
     llms = {"classify": FakeLLM(["ANSWER: YES\nREASON: a stored procedure request"]), "generate": FakeLLM([SCRIPT])}
-    monkeypatch.setattr("app.rag.generator._build_llm", lambda purpose="generate": llms[purpose])
+    monkeypatch.setattr("app.adapters.llm_provider", lambda: FakeProvider(llms))
     monkeypatch.setattr("app.rag.generator.retrieve_context", lambda *_args, **_kwargs: CONTEXT)
 
     with TestClient(main.app) as client:
@@ -289,9 +305,12 @@ def test_unexpected_error_is_a_bare_500(api, monkeypatch):
 
 
 def test_missing_api_key_is_not_configured(api, monkeypatch):
+    """The real Gemini provider, which refuses before any network call."""
+    from app.adapters.gemini import GeminiProvider
+
     monkeypatch.setenv("GEMINI_API_KEY", "")
     main.get_settings.cache_clear()
-    monkeypatch.setattr("app.rag.generator._build_llm", lambda purpose="generate": main.get_settings().require_gemini_api_key())
+    monkeypatch.setattr("app.adapters.llm_provider", GeminiProvider)
 
     response = api.client.post("/v1/generate", json=ask("Give everyone in sales a new title"))
 

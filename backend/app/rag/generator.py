@@ -1,26 +1,18 @@
 """Assembles the RAG prompt from retrieved context and prior conversation
-turns, then calls Gemini to generate or revise a stored procedure."""
+turns, then calls the configured LLM provider to generate or revise a
+stored procedure."""
 
 import logging
 import re
 import time
 from collections.abc import Iterator
-from typing import Literal
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-
+from app import adapters
 from app.config import get_settings
 from app.errors import UpstreamTimeout
 from app.observability import prompt_fingerprint
-from app.rag.llm import (
-    build_chat_model,
-    call_with_retry,
-    disable_thinking_if_rejected,
-    should_retry_generation,
-    thinking_level,
-    with_thinking_fallback,
-)
 from app.rag.retriever import RetrievedChunk, retrieve_context
+from app.rag.retry import call_with_retry, should_retry_generation
 from app.rag.section_parser import parse_sections
 from app.rag.validator import validate_script
 
@@ -153,19 +145,6 @@ the complete script with all seven sections, not just a diff.
 """
 
 
-def _extract_text(content: str | list) -> str:
-    """ChatGoogleGenerativeAI returns `.content` as a plain string for some
-    models and as a list of content blocks (text/thinking/etc.) for others --
-    normalize both into a single string."""
-    if isinstance(content, str):
-        return content
-    return "".join(
-        block.get("text", "")
-        for block in content
-        if isinstance(block, dict) and block.get("type") == "text"
-    )
-
-
 def _format_schema_context(chunks: list[RetrievedChunk]) -> str:
     return "\n\n".join(chunk.text for chunk in chunks)
 
@@ -208,12 +187,6 @@ def build_prompt(
     return "\n\n".join(parts)
 
 
-def _build_llm(purpose: Literal["classify", "generate"] = "generate") -> ChatGoogleGenerativeAI:
-    """Both LLM call sites (classifier and generation) build their client
-    here, so timeouts, retries and test fakes cover both."""
-    return build_chat_model(purpose)
-
-
 def _format_classifier_conversation_block(prior_messages: list[dict] | None) -> str:
     prior_user_texts = [m["content"] for m in (prior_messages or []) if m["role"] == "user"]
     if not prior_user_texts:
@@ -232,8 +205,7 @@ def classify_request(user_prompt: str, prior_messages: list[dict] | None = None)
     isolation."""
     conversation_block = _format_classifier_conversation_block(prior_messages)
     prompt = CLASSIFIER_PROMPT.format(conversation_block=conversation_block, user_prompt=user_prompt)
-    response = with_thinking_fallback(lambda: _build_llm("classify").invoke(prompt), "classify")
-    response_text = _extract_text(response.content)
+    response_text = adapters.llm_provider().complete(prompt, "classify")
 
     answer_match = _ANSWER_RE.search(response_text)
     reason_match = _REASON_RE.search(response_text)
@@ -255,7 +227,7 @@ def _classify(user_prompt: str, prior_messages: list[dict] | None, timings: dict
             # only for rejections, where it is what you need to tune the gate.
             "reason": None if is_valid else reason,
             "latency_ms": timings["classify"],
-            "thinking_level": thinking_level("classify") or "auto",
+            **adapters.llm_provider().log_fields("classify"),
             "prior_messages": len(prior_messages or []),
             **prompt_fingerprint(user_prompt),
         },
@@ -306,7 +278,7 @@ def _finalize(
         "generation",
         extra={
             "latency_ms": timings.get("generation"),
-            "thinking_level": thinking_level("generate") or "auto",
+            **adapters.llm_provider().log_fields("generate"),
             "script_chars": len(full_script),
             "sql_valid": sql_valid,
             "sql_issues": sql_issues,
@@ -335,12 +307,12 @@ def generate_stored_procedure(
 
     settings = get_settings()
     start = time.monotonic()
-    response = call_with_retry(
-        lambda: _build_llm("generate").invoke(prompt),
+    full_script = call_with_retry(
+        lambda: adapters.llm_provider().complete(prompt, "generate"),
         attempts=settings.generation_attempts,
     )
     timings["generation"] = _ms_since(start)
-    return _finalize(user_prompt, _extract_text(response.content), context, timings)
+    return _finalize(user_prompt, full_script, context, timings)
 
 
 def _stream_generation(prompt: str) -> Iterator[str]:
@@ -354,26 +326,19 @@ def _stream_generation(prompt: str) -> Iterator[str]:
     settings = get_settings()
     deadline = time.monotonic() + settings.generation_timeout_s
 
-    attempt = 0
-    while True:
-        attempt += 1
+    for attempt in range(1, settings.generation_attempts + 1):
         started = time.monotonic()
         emitted = False
         try:
-            for chunk in _build_llm("generate").stream(prompt):
+            for text in adapters.llm_provider().stream(prompt, "generate"):
                 if time.monotonic() > deadline:
                     raise UpstreamTimeout(f"generation exceeded {settings.generation_timeout_s}s")
-                text = _extract_text(chunk.content)
-                if text:
-                    emitted = True
-                    yield text
+                emitted = True
+                yield text
             return
         except UpstreamTimeout:
             raise
         except Exception as exc:
-            if not emitted and disable_thinking_if_rejected(exc, "generate"):
-                attempt -= 1  # not a failed attempt: retry at once, without the setting
-                continue
             elapsed_s = time.monotonic() - started
             if emitted or not should_retry_generation(
                 exc, attempt=attempt, attempts=settings.generation_attempts, elapsed_s=elapsed_s

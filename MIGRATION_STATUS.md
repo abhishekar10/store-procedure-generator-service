@@ -449,7 +449,17 @@ store (quota trimming, broken storage, malformed data, request shape), and the U
 flow against the rebuilt containers. **Not clicked through in a browser.** Conversations
 from the old server-side `app.db` are not migrated.
 
-Remaining in this phase: adapters (step 3), OpenAPI spec + `docs/ARCHITECTURE.md` (step 4).
+**Step 3 done — adapters.** `app/adapters/`: `base.py` (Protocols `LLMProvider`,
+`VectorStore`, `SchemaSource` + `RetrievedChunk`/`Table`/`Column`/`ForeignKey`), `gemini.py`
+(was `app/rag/llm.py`; now also owns the thinking-level fallback, inside `complete`/`stream`),
+`chroma.py` (client singleton + in-place sync, moved from retriever/ingest), `sqlite_schema.py`
+(the one schema reader; replaces `app/db/reference_schema.py` and ingest's own copy; opens the DB
+read-only). Selected by `LLM_PROVIDER` / `VECTOR_STORE` / `SCHEMA_SOURCE`, each a one-value
+Literal. The retry policy moved to `app/rag/retry.py` (provider-independent). Verified that the
+schema and pattern chunk texts and the `/v1/schema` output are byte-identical to before, so
+embeddings and the API did not change. Tests now fake `app.adapters.llm_provider`.
+
+Remaining in this phase: OpenAPI spec + `docs/ARCHITECTURE.md` (step 4).
 
 Original plan for this phase:
 
@@ -502,8 +512,9 @@ Original plan for this phase:
   rejection, validation errors, upstream 503, SSE event shape. **Largely done in Phase 2**
   (`tests/test_api_hardening.py`, 25 tests, using the `isolated_app_db` fixture); Phase 3
   must port them to the `/v1` stateless endpoints and drop the store fixture. The mocking pattern that
-  works is patching the module-level factory functions
-  (`app.rag.generator._build_llm`, `app.rag.retriever._get_embeddings`), because
+  works is patching the adapter factories (`app.adapters.llm_provider`, and
+  `app.rag.generator.retrieve_context` for retrieval) -- since Phase 3 step 3; before that it
+  was `app.rag.generator._build_llm` and `app.rag.retriever._get_embeddings` -- because
   everything resolves `config.`-style settings at call time, not import time.
 - **One contract test** pinning the `/v1` response shape to the checked-in OpenAPI spec.
 - Evals stay live-API and out of the default run. **`test_retrieval_eval.py` needs a

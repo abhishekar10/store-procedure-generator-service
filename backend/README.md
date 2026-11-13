@@ -19,14 +19,18 @@ backend/
   app/
     main.py                    FastAPI app and routes
     config.py                  paths, env vars, model names
+    adapters/                  the three seams, and one implementation of each
+      base.py                    LLMProvider / VectorStore / SchemaSource protocols + data types
+      gemini.py                  LLMProvider: Gemini chat + embeddings, timeouts, thinking level
+      chroma.py                  VectorStore: local Chroma persistent store
+      sqlite_schema.py           SchemaSource: db/reference.db + db/metadata.json
     rag/
-      ingest.py                  embeds schema + pattern chunks into Chroma
+      ingest.py                  embeds schema + pattern chunks into the vector store
       retriever.py                schema similarity search + per-category pattern pull
-      generator.py                 prompt assembly + Gemini call + classification gate
+      generator.py                 prompt assembly + model call + classification gate
+      retry.py                      the generation retry policy (provider-independent)
       section_parser.py             splits `-- SECTION: X` markers into a dict
       validator.py                   best-effort structural SQL check
-    db/
-      reference_schema.py         read-only queries against db/reference.db
     sp_templates/                the authored pattern library (source docs for the pattern corpus)
   db/
     schema.sql                  reference schema DDL (9 tables)
@@ -231,6 +235,27 @@ While the model is thinking the stream sends an SSE comment line,
 never sees the connection idle long enough to drop it. SSE clients ignore
 comment lines.
 
+## Adapters
+
+The pipeline depends on three interfaces (`app/adapters/base.py`), not on
+vendor SDKs:
+
+| Seam | Does | Implementation | Setting |
+|---|---|---|---|
+| `LLMProvider` | completion, streaming, embeddings | Gemini (`gemini.py`) | `LLM_PROVIDER=gemini` |
+| `VectorStore` | stores chunks + vectors, nearest-neighbour search | Chroma (`chroma.py`) | `VECTOR_STORE=chroma` |
+| `SchemaSource` | the reference schema generation is grounded in | SQLite (`sqlite_schema.py`) | `SCHEMA_SOURCE=sqlite` |
+
+One implementation of each exists; the settings are where a second would be
+selected (`app/adapters/__init__.py`). Swapping one means writing a class
+with the same methods and adding a branch there. Two things stay outside the
+interfaces: the generation retry policy (`app/rag/retry.py`, the same for any
+provider), and error mapping (`app/errors.py`), which recognises google-genai,
+httpx and Chroma exceptions -- a new implementation must raise those or be
+added there. `SchemaSource` is also where the schema is read for both the
+`/v1/schema` endpoint and ingest; it used to be read twice, with slightly
+different shapes.
+
 ## Hardening
 
 Authentication is out of scope by design: in a real deployment the service
@@ -262,8 +287,9 @@ trace or upstream payload. Codes are stable; messages may change.
 | `upstream_unavailable` | 503 | any other Gemini or transport failure |
 | `internal_error` | 500 | anything else (logged with traceback server-side) |
 
-**Timeouts and retries** (`app/rag/llm.py`). All Gemini clients -- the
-classifier, generation and embeddings -- are built in one place. The
+**Timeouts and retries** (`app/adapters/gemini.py`, `app/rag/retry.py`).
+All Gemini clients -- the classifier, generation and embeddings -- are built
+in one place. The
 classifier (20s) and embeddings (20s) use the client library's own retry, 3
 attempts. Generation (200s; ~15s at thinking level `low`, up to ~160s at
 `auto`) does not: that retry also fires after a timeout, which would turn

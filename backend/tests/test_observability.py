@@ -6,7 +6,7 @@ import pytest
 from google.genai import errors as genai_errors
 
 from app.observability import JsonFormatter, emit_generation_metrics, prompt_fingerprint, request_id_var
-from app.rag.llm import call_with_retry
+from app.rag.retry import call_with_retry
 from app.ratelimit import TokenBucketLimiter
 
 
