@@ -3,6 +3,7 @@
 - pattern chunks via a deterministic pull of one chunk per category
 """
 
+import threading
 from dataclasses import asdict, dataclass
 
 import chromadb
@@ -19,8 +20,20 @@ class RetrievedChunk:
     score: float | None = None
 
 
+_client: chromadb.ClientAPI | None = None
+_client_lock = threading.Lock()
+
+
 def _get_client() -> chromadb.ClientAPI:
-    return chromadb.PersistentClient(path=str(get_settings().vector_store_dir))
+    """One Chroma client per process. Creating PersistentClients concurrently
+    from several threads races inside chromadb's shared-system setup ("Could
+    not connect to tenant default_tenant") -- reproduced with four parallel
+    generations -- and FastAPI runs sync handlers on a threadpool."""
+    global _client
+    with _client_lock:
+        if _client is None:
+            _client = chromadb.PersistentClient(path=str(get_settings().vector_store_dir))
+        return _client
 
 
 def _get_embeddings() -> GoogleGenerativeAIEmbeddings:

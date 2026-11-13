@@ -3,7 +3,8 @@ generation) for each golden prompt. Each generation takes roughly 130-180s and
 costs real tokens. Run explicitly with `pytest evals/`, not part of the
 default `pytest` run.
 
-Guards the section contract, not SQL quality. The defect this exists to catch:
+Guards the section contract, not SQL quality: one procedure opened in
+PRE_VALIDATION and closed by ROLLBACK_AUTO. The defect this exists to catch:
 the model emitted the full CREATE PROCEDURE under ROLLBACK_AUTO and left
 MAIN_SCRIPT a 98-240 char fragment, while the old validator still reported
 `sql_valid: true`.
@@ -35,16 +36,17 @@ def generations() -> dict[str, dict]:
 
 @pytest.mark.eval
 @pytest.mark.parametrize("case", GOLDEN_PROMPTS)
-def test_main_procedure_lands_in_main_script(generations, case):
+def test_one_procedure_spans_the_sections(generations, case):
     sections = generations[case]["sections"]
 
-    assert _PROCEDURE_DECLARATION_RE.search(sections["main_script"]), (
-        f"{case}: MAIN_SCRIPT has no procedure declaration ({len(sections['main_script'])} chars)"
+    assert _PROCEDURE_DECLARATION_RE.search(sections["pre_validation"]), (
+        f"{case}: PRE_VALIDATION does not open the procedure"
     )
     assert not _PROCEDURE_DECLARATION_RE.search(sections["rollback_auto"]), (
         f"{case}: ROLLBACK_AUTO declares a procedure ({len(sections['rollback_auto'])} chars)"
     )
     assert "EXCEPTION" in sections["rollback_auto"].upper(), f"{case}: ROLLBACK_AUTO has no EXCEPTION handler"
+    assert sections["main_script"].strip(), f"{case}: MAIN_SCRIPT is empty"
 
 
 @pytest.mark.eval

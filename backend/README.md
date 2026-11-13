@@ -208,23 +208,32 @@ generation fails partway through.
 
 ## Validation
 
-Every generation gets a best-effort structural check (`app/rag/validator.py`):
-balanced parentheses, balanced `$$` dollar-quoted blocks, all seven
-sections present and non-empty, and the main procedure in the right place:
-`MAIN_SCRIPT` must declare a procedure, no section other than `MAIN_SCRIPT`
-and `ROLLBACK_MANUAL` may declare one, and `MAIN_SCRIPT` must not be under a
-quarter the size of the largest other section. It is not a real SQL parser --
-it catches the kinds of malformed output an LLM occasionally produces, not
-genuine PL/pgSQL correctness.
+Every generation is one deployable script. The seven `-- SECTION:` markers
+are SQL comments, so they sit inside a single procedure body:
 
-Section contract: `MAIN_SCRIPT` holds the one `CREATE OR REPLACE PROCEDURE`
-for the request, ending in its exception handler; `ROLLBACK_AUTO` restates
-only that `EXCEPTION WHEN OTHERS` handler; `ROLLBACK_MANUAL` is a separate
-`rollback_*` procedure that restores from the backup. The pattern templates
-in `app/sp_templates/` follow the same contract, and
-`tests/test_pattern_templates.py` enforces it -- they are retrieved into
-every prompt as house style, so a template that breaks the contract teaches
-the model to break it.
+| Section | Holds |
+|---|---|
+| `PRE_VALIDATION` | `CREATE OR REPLACE PROCEDURE ... AS $$`, `DECLARE`, `BEGIN`, then guard checks |
+| `TEMP_TABLES` | statements inside the body that stage rows (`ON COMMIT DROP`) |
+| `BACKUP` | statements inside the body that snapshot the rows about to change |
+| `MAIN_SCRIPT` | statements inside the body that make the change |
+| `POST_VALIDATION` | statements inside the body that check the result and `RAISE` on failure |
+| `ROLLBACK_AUTO` | `EXCEPTION WHEN OTHERS THEN ... RAISE; END; $$;`, closing the procedure |
+| `ROLLBACK_MANUAL` | a separate `rollback_*` procedure that restores from the backup |
+
+Each generation also gets a best-effort structural check
+(`app/rag/validator.py`): balanced parentheses and `$$`, all seven sections
+non-empty, a procedure declared only in `PRE_VALIDATION` and
+`ROLLBACK_MANUAL`, `ROLLBACK_AUTO` closing the body with an `EXCEPTION`
+handler, and no `$$` inside the body sections (it would end the body early).
+It is not a real SQL parser -- it catches the kinds of malformed output an
+LLM occasionally produces, not genuine PL/pgSQL correctness.
+
+The pattern templates in `app/sp_templates/` are one worked example of the
+same shape (reassigning a department's employees -- deliberately none of the
+golden eval prompts). `tests/test_pattern_templates.py` checks that they
+assemble into a valid script. They are retrieved into every prompt as house
+style, so a template that breaks the contract teaches the model to break it.
 
 ## Telemetry & metrics
 

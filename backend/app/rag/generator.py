@@ -48,13 +48,16 @@ PostgreSQL (PL/pgSQL) stored procedure.
 Follow these rules:
 1. Only reference tables and columns that appear in the "Schema context" below. \
 Never invent a table or column name.
-2. Follow the structure and idioms shown in the "Pattern context" below for each \
-section -- they are examples of how this team writes each part of a procedure.
+2. The "Pattern context" below is one complete worked example -- a different \
+operation, split into the same seven sections -- showing how this team writes \
+each part. Reuse its structure and idioms. Do not reuse its tables, columns or \
+logic unless the request is that same operation.
 3. Write PL/pgSQL, not T-SQL or PL/SQL. Use `BEGIN ... EXCEPTION ... END` for \
 error handling, not TRY/CATCH.
-4. Emit your entire answer as a single SQL script, divided into exactly these \
-seven sections, in this order, each starting with its own marker line and \
-containing only SQL/PL-pgSQL code (no prose, no markdown fences):
+4. Emit your entire answer as a single SQL script that runs top to bottom, \
+divided into exactly these seven sections, in this order, each starting with \
+its own marker line and containing only SQL/PL-pgSQL code (no prose, no \
+markdown fences):
 
 -- SECTION: PRE_VALIDATION
 -- SECTION: TEMP_TABLES
@@ -64,55 +67,60 @@ containing only SQL/PL-pgSQL code (no prose, no markdown fences):
 -- SECTION: ROLLBACK_AUTO
 -- SECTION: ROLLBACK_MANUAL
 
-Each section has a fixed content contract:
-- PRE_VALIDATION: guard checks that fail fast before any data is touched \
-(target rows exist, are in the expected state, inputs are sane).
-- TEMP_TABLES: CREATE TEMP TABLE statements that stage computed rows.
-- BACKUP: snapshot of the rows about to be mutated.
-- MAIN_SCRIPT: the one complete `CREATE OR REPLACE PROCEDURE <name>(...) \
-LANGUAGE plpgsql AS $$ ... $$;` definition for this request, ending in its \
-`EXCEPTION WHEN OTHERS THEN ... RAISE;` handler. This is the largest section. \
-The main procedure is defined here and nowhere else.
-- POST_VALIDATION: checks that the mutation left the data consistent, \
-raising on failure.
-- ROLLBACK_AUTO: only the `EXCEPTION WHEN OTHERS THEN ...` handler that closes \
-the MAIN_SCRIPT body, restated on its own. Never a CREATE PROCEDURE.
-- ROLLBACK_MANUAL: a separate `rollback_<name>` procedure that restores from \
-the BACKUP snapshot after a committed run. Never a copy of the main procedure.
+The script defines ONE main procedure whose body runs from PRE_VALIDATION to \
+the end of ROLLBACK_AUTO. The marker lines are SQL comments, so they sit inside \
+that body. Each section has a fixed content contract:
+- PRE_VALIDATION: opens the main procedure -- `CREATE OR REPLACE PROCEDURE \
+<name>(<params>) LANGUAGE plpgsql AS $$`, a DECLARE block for every variable \
+the body uses, `BEGIN` -- then guard checks that fail fast before any data is \
+touched.
+- TEMP_TABLES: statements inside the body that stage rows in temp tables \
+(`ON COMMIT DROP`).
+- BACKUP: statements inside the body that snapshot the rows about to be mutated.
+- MAIN_SCRIPT: statements inside the body that make the change the request \
+asks for. No procedure header here.
+- POST_VALIDATION: statements inside the body that check the result and RAISE \
+on failure.
+- ROLLBACK_AUTO: closes the main procedure -- `EXCEPTION WHEN OTHERS THEN ... \
+RAISE;`, then `END;` and `$$;`.
+- ROLLBACK_MANUAL: a separate `CREATE OR REPLACE PROCEDURE rollback_<name>` \
+that restores from the BACKUP snapshot after a committed run.
 
-Worked example of the shape (abbreviated -- a real answer has full SQL in \
-every section):
+Inside the body (TEMP_TABLES through POST_VALIDATION) never write `$$`, not \
+even in a comment, and never use `DO` blocks: a `$$` there ends the body early.
+
+Skeleton of the shape:
 -- SECTION: PRE_VALIDATION
-DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM payroll_runs WHERE payroll_run_id = 1) \
-THEN RAISE EXCEPTION 'run 1 not found'; END IF; END $$;
--- SECTION: TEMP_TABLES
-CREATE TEMP TABLE tmp_calc (employee_id INTEGER, net_pay NUMERIC) ON COMMIT DROP;
--- SECTION: BACKUP
-INSERT INTO payroll_entries_backup (...) SELECT ... FROM payroll_entries WHERE payroll_run_id = 1;
--- SECTION: MAIN_SCRIPT
-CREATE OR REPLACE PROCEDURE process_payroll_run(p_payroll_run_id INTEGER)
+CREATE OR REPLACE PROCEDURE <name>(<params>)
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    <variables>
 BEGIN
-    UPDATE payroll_runs SET status = 'processing' WHERE payroll_run_id = p_payroll_run_id;
-    -- ... the main mutation ...
+    <guard checks>
+-- SECTION: TEMP_TABLES
+    <CREATE TEMP TABLE ... ON COMMIT DROP; INSERT INTO it ...>
+-- SECTION: BACKUP
+    <snapshot the rows about to change>
+-- SECTION: MAIN_SCRIPT
+    <the change itself>
+-- SECTION: POST_VALIDATION
+    <checks that RAISE EXCEPTION on failure>
+-- SECTION: ROLLBACK_AUTO
 EXCEPTION
     WHEN OTHERS THEN
-        RAISE NOTICE 'process_payroll_run failed: %', SQLERRM;
+        RAISE NOTICE '<name> failed: %', SQLERRM;
         RAISE;
 END;
 $$;
--- SECTION: POST_VALIDATION
-DO $$ BEGIN IF EXISTS (SELECT 1 FROM payroll_entries WHERE net_pay < 0) \
-THEN RAISE EXCEPTION 'negative net_pay'; END IF; END $$;
--- SECTION: ROLLBACK_AUTO
-EXCEPTION
-    WHEN OTHERS THEN
-        RAISE NOTICE 'process_payroll_run failed: %', SQLERRM;
-        RAISE;
 -- SECTION: ROLLBACK_MANUAL
-CREATE OR REPLACE PROCEDURE rollback_payroll_run(p_payroll_run_id INTEGER)
-LANGUAGE plpgsql AS $$ BEGIN /* restore from payroll_entries_backup */ END; $$;
+CREATE OR REPLACE PROCEDURE rollback_<name>(<params>)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    <restore from the backup>
+END;
+$$;
 
 If a section genuinely doesn't apply to this request, still include its marker \
 followed by a one-line comment explaining why it's empty.

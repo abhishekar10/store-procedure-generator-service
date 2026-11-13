@@ -1,27 +1,33 @@
 -- Pattern: PRE_VALIDATION
--- Fail fast before touching any data: confirm the target row(s) exist, are
--- in an expected state, and that inputs are sane.
+-- Opens the procedure. The script is ONE procedure whose body runs from here
+-- to the end of ROLLBACK_AUTO, with the section markers as comments inside it.
+-- PRE_VALIDATION holds the CREATE OR REPLACE PROCEDURE header, a DECLARE
+-- block for every variable the body uses, BEGIN, and then guard checks that
+-- fail fast before any data is touched. Parameters and variables are in scope
+-- in every later section.
 
-DO $$
+CREATE OR REPLACE PROCEDURE reassign_department_employees(
+    p_from_department_id INTEGER,
+    p_to_department_id   INTEGER
+)
+LANGUAGE plpgsql
+AS $$
 DECLARE
-    v_run_status TEXT;
+    v_staged_count INTEGER;
+    v_moved_count  INTEGER;
 BEGIN
-    SELECT status INTO v_run_status
-    FROM payroll_runs
-    WHERE payroll_run_id = p_payroll_run_id;
-
-    IF v_run_status IS NULL THEN
-        RAISE EXCEPTION 'Payroll run % does not exist', p_payroll_run_id;
+    IF p_from_department_id IS NULL OR p_to_department_id IS NULL THEN
+        RAISE EXCEPTION 'Both source and target department are required';
     END IF;
 
-    IF v_run_status NOT IN ('draft', 'processing') THEN
-        RAISE EXCEPTION 'Payroll run % is in status %, expected draft or processing',
-            p_payroll_run_id, v_run_status;
+    IF p_from_department_id = p_to_department_id THEN
+        RAISE EXCEPTION 'Source and target department are both %', p_from_department_id;
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM employees WHERE employment_status = 'active'
-    ) THEN
-        RAISE EXCEPTION 'No active employees found, nothing to process';
+    IF NOT EXISTS (SELECT 1 FROM departments WHERE department_id = p_from_department_id) THEN
+        RAISE EXCEPTION 'Source department % does not exist', p_from_department_id;
     END IF;
-END $$;
+
+    IF NOT EXISTS (SELECT 1 FROM departments WHERE department_id = p_to_department_id) THEN
+        RAISE EXCEPTION 'Target department % does not exist', p_to_department_id;
+    END IF;

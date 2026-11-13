@@ -6,7 +6,7 @@ built and verified, the measurements that constrain the remaining work, and what
 next. Everything here was verified by running it — nothing is aspirational. Where a
 claim is a measurement, the number is given.
 
-Last updated after Phase 1b. Repo: `github.com/abhishekar10/store-procedure-generator-service`
+Last updated after Phase 1c. Repo: `github.com/abhishekar10/store-procedure-generator-service`
 
 ---
 
@@ -62,7 +62,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 ```bash
 cd backend
 
-.venv/bin/python -m pytest -q          # 32 offline tests, ~0.05s, no API key needed
+.venv/bin/python -m pytest -q          # 35 offline tests, ~0.05s, no API key needed
 .venv/bin/python -m pytest evals/ -q   # 23 live-API evals, ~3m40s, costs real tokens
 .venv/bin/ruff check .                 # lint
 .venv/bin/ruff check . --fix
@@ -182,10 +182,66 @@ issues; procedure in `MAIN_SCRIPT` every time; `ROLLBACK_AUTO` 126–157 chars o
 `process_payroll` reproduces the `main_script.sql` pattern nearly verbatim — every
 pattern is written around that same payroll example. Not a defect, but worth knowing.
 
-**The Docker image bakes the corpus in, so it must be rebuilt** to pick up the new
-patterns. The local `data/vector_store/` has been re-ingested.
+Verified: 32/32 offline tests, ruff clean, 23/23 live evals (3m42s). **Superseded by
+Phase 1c**, which replaced this section layout.
 
-Verified: 32/32 offline tests, ruff clean, 23/23 live evals (3m42s).
+### Phase 1c — one executable procedure (complete)
+
+Phase 1b left two problems. `full_script` could not run top to bottom: the
+`PRE_VALIDATION` / `POST_VALIDATION` patterns were standalone `DO $$` blocks referencing
+procedure parameters out of scope, and `ROLLBACK_AUTO` was a duplicated handler fragment.
+And the pattern example *was* golden prompt #1, so that eval case measured copying.
+
+**New section contract: one procedure spans the sections.** The `-- SECTION:` markers are
+SQL comments, so they sit inside the dollar-quoted body:
+
+- `PRE_VALIDATION` opens the procedure (header, `DECLARE`, `BEGIN`, guards).
+- `TEMP_TABLES`, `BACKUP`, `MAIN_SCRIPT`, `POST_VALIDATION` are statements inside the body.
+- `ROLLBACK_AUTO` is the real `EXCEPTION ... END; $$;` that closes it — no duplication.
+- `ROLLBACK_MANUAL` is a separate `rollback_*` procedure.
+
+Changes:
+
+- All 7 templates rewritten as one worked example, `reassign_department_employees`, which
+  is none of the golden prompts. A test pins that.
+- `SYSTEM_PROMPT` rule 2 says the patterns are a *different* operation to learn idioms
+  from, not copy. Contracts and a placeholder skeleton describe the new layout, and it
+  forbids `$$` inside the body (even in comments: a `$$` anywhere ends the quote).
+- `validator.py` checks are now structural, replacing 1b's size-ratio heuristic, which
+  would false-positive on heavy staging: procedure declared only in `PRE_VALIDATION` /
+  `ROLLBACK_MANUAL`; `PRE_VALIDATION` opens one; `ROLLBACK_AUTO` closes with `EXCEPTION`
+  and `$$`; no `$$` in the body sections.
+- **Fixed a real concurrency bug** in `retriever._get_client()`: it built a new Chroma
+  `PersistentClient` per call, and concurrent construction races inside chromadb
+  ("Could not connect to tenant default_tenant"). Reproduced with four parallel
+  generations. Now one lock-guarded client per process. FastAPI runs sync handlers on a
+  threadpool, so concurrent `/generate` requests were exposed to this too.
+
+**Verified against real PostgreSQL 16** (throwaway `postgres:16-alpine` container,
+reference schema ported from SQLite; not part of the repo or CI yet):
+
+- The assembled templates compile; `CALL reassign_department_employees(1, 2)` moved 4
+  employees; the manual rollback restored all 4; a bad target department raised and
+  left no partial writes.
+- All 4 golden generations compile. Called against seed data: `process_payroll(2)`
+  created 10 entries; `terminate_employee_and_reverse_payroll` reversed 1 entry;
+  `onboard_employee` inserted the employee and the hire salary row; `approve_timesheet`
+  raised its own guard because the run it targeted was already finalized — correct
+  behaviour. `onboard_employee` first failed on a non-null `employee_id`: an artefact of
+  the port (SQLite `INTEGER PRIMARY KEY` auto-assigns, plain Postgres does not), fixed
+  in the harness with identity columns.
+
+**Re-baseline** (4 golden prompts, concurrent): all `sql_valid: true`, no issues.
+
+| Prompt | pre_validation | main_script | rollback_auto | latency |
+|---|---|---|---|---|
+| process_payroll | 1163 | 893 | 113 | **232s** |
+| onboard_employee | 1829 | 847 | 114 | 87s |
+| approve_timesheet | 3830 | 643 | 115 | 142s |
+| terminate_employee | 1200 | 587 | 136 | 44s |
+
+`MAIN_SCRIPT` is no longer the largest section — by design, it now holds only the
+mutation. The local `data/vector_store/` has been re-ingested.
 
 ### Verified end to end (Phase 1)
 
@@ -206,9 +262,9 @@ Verified: 32/32 offline tests, ruff clean, 23/23 live evals (3m42s).
 Measured repeatedly. Telemetry from live runs: `avg_generation_latency_ms = 171,722`;
 classifier ~4.7s, retrieval ~0.6s, generation ~172s.
 
-The Phase 1b re-baseline measured 61–144s end to end across the 4 golden prompts (run
-concurrently). That is faster, but it is four samples, and every one still exceeds the
-ALB's 60s default. Plan for the 180s worst case.
+Phase 1b/1c re-baselines (4 golden prompts each, run concurrently) measured **44–232s**
+end to end. The 232s run is a new worst case. Plan for ~240s: the generation timeout must
+exceed it, and the ALB's `idle_timeout = 300` leaves only modest headroom.
 
 **This is the dominant architectural constraint.**
 
@@ -355,7 +411,7 @@ afterwards. Never leave anything running that costs money without saying so.
 
 ### Phase 4 — tests
 
-- The 22 pure tests in `test_section_parser.py`, `test_validator.py` and `test_pattern_templates.py`
+- The 25 pure tests in `test_section_parser.py`, `test_validator.py` and `test_pattern_templates.py`
   survive untouched.
 - The 10 tests in `test_conversation_store.py` and `test_telemetry_store.py` are deleted
   with the stores. `conftest.py`'s `isolated_app_db` fixture then has no users —
@@ -413,10 +469,9 @@ Pass it with `--secret id=gemini_key,env=GEMINI_API_KEY`, never as a build ARG.
   already carries a "superseded" banner. Do not treat them as current spec.
 - `stored-procs/onboard_a_new_employee_and_record_their_.sql` is a saved generation
   output, not source. It belongs in `docs/sample-output/`.
-- `full_script` is a sectioned document, not a script that runs top to bottom. The
-  `PRE_VALIDATION` / `POST_VALIDATION` patterns are `DO` blocks that reference procedure
-  parameters (`p_payroll_run_id`) out of scope, and `ROLLBACK_AUTO` is a bare handler
-  fragment. This predates Phase 1b. Do not claim the output is directly executable.
+- Execution against real Postgres was verified by hand (Phase 1c), not automated. A CI
+  job that loads the schema into a Postgres service container and compiles each eval
+  generation would turn that into a regression check (planned, not built).
 - Retrieval precision is loose on some prompts — all 9 tables live in one domain, so
   embeddings cluster tightly. The eval thresholds (recall ≥ 0.5 per case, ≥ 0.6 mean)
   are regression canaries, **not** a claim that retrieval is good.

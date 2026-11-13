@@ -11,7 +11,7 @@ export const STAGE_LABELS = {
 // "drafting_script" is the long step (Gemini's reasoning time before the
 // first token, often 30-60s) with no further backend signal until text
 // starts streaming. Cycle through what's actually happening during that
-// step -- the six sections the model is producing -- so the wait reads as
+// step -- the seven sections the model is producing -- so the wait reads as
 // progress instead of a stuck label.
 export const DRAFTING_SUBPHRASES = [
   "Scripting the stored procedure…",
