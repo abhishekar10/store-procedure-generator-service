@@ -1,6 +1,7 @@
 # Generated artifacts. The image builds its own reference DB and vector store
 # at build time, so copying a local one in would ship stale embeddings, 10 MB
-# of orphaned Chroma segments, and any local conversation history in app.db.
+# of orphaned Chroma segments, and any app.db left over from before the
+# service went stateless.
 data/
 db/reference.db
 

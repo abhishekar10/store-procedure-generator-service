@@ -78,9 +78,7 @@ class Settings(BaseSettings):
     reference_db_path: Path = BACKEND_DIR / "db" / "reference.db"
     schema_metadata_path: Path = BACKEND_DIR / "db" / "metadata.json"
     sp_templates_dir: Path = APP_DIR / "sp_templates"
-    data_dir: Path = BACKEND_DIR / "data"
     vector_store_dir: Path = BACKEND_DIR / "data" / "vector_store"
-    app_db_path: Path = BACKEND_DIR / "data" / "app.db"
 
     # --- upstream timeouts and retries -----------------------------------
     # Generation takes 11-16s at thinking level "low". 200s is headroom for
@@ -105,8 +103,12 @@ class Settings(BaseSettings):
     generation_retry_backoff_s: float = Field(default=2, ge=0)
 
     # --- request limits ----------------------------------------------------
+    # Per user message.
     max_prompt_chars: int = Field(default=8000, ge=1)
-    max_request_bytes: int = Field(default=64 * 1024, ge=1024)
+    # The caller resends the whole conversation, including every script the
+    # service returned (~8 KB each), so the body cap sizes how long a
+    # conversation can get: 256 KB is roughly 25 turns.
+    max_request_bytes: int = Field(default=256 * 1024, ge=1024)
 
     # --- rate limiting (in-process fallback; see app/ratelimit.py) -------
     rate_limit_enabled: bool = True

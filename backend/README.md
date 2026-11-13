@@ -27,8 +27,6 @@ backend/
       validator.py                   best-effort structural SQL check
     db/
       reference_schema.py         read-only queries against db/reference.db
-      conversation_store.py        chat conversations + messages (data/app.db)
-      telemetry_store.py            per-request metrics (data/app.db)
     sp_templates/                the authored pattern library (source docs for the pattern corpus)
   db/
     schema.sql                  reference schema DDL (9 tables)
@@ -37,7 +35,6 @@ backend/
     build_db.py                      builds db/reference.db from the two files above
     reference.db                      the built SQLite database (generated, gitignored)
   data/
-    app.db                     conversations + messages + telemetry (generated, gitignored)
     vector_store/                Chroma persistent store (generated, gitignored)
   tests/                      fast, offline unit tests (no API calls) -- default `pytest` run
   evals/                       RAG quality evals (live API calls) -- run explicitly with `pytest evals/`
@@ -45,7 +42,7 @@ backend/
   requirements.txt
 ```
 
-`db/reference.db`, `data/app.db`, and `data/vector_store/` are all generated
+`db/reference.db` and `data/vector_store/` are generated
 and gitignored — rebuild them with the commands below rather than editing
 them directly.
 
@@ -105,49 +102,71 @@ Raw OpenAPI schema: http://127.0.0.1:8000/api/openapi.json
 
 ## Endpoints
 
-| Method | Path                       | Description                                                         |
-|--------|----------------------------|-----------------------------------------------------------------------|
-| POST   | `/generate`                | `{ prompt, conversation_id? }` → full response, non-streaming          |
-| POST   | `/generate/stream`         | `{ prompt, conversation_id?, is_regenerate? }` → same, as SSE            |
-| GET    | `/conversations`           | List conversations (id, title, created_at, message_count)                 |
-| GET    | `/conversations/{id}`      | Full message history for one conversation (404 if missing)                 |
-| DELETE | `/conversations/{id}`      | Delete a conversation and its messages (404 if missing)                     |
-| GET    | `/schema`                  | Reference schema tables/columns                                             |
-| GET    | `/health`                  | Liveness: the process is up. No dependencies                                 |
-| GET    | `/ready`                   | Readiness: config present, reference DB and both collections loaded (503 if not) |
-| GET    | `/metrics`                 | Aggregate telemetry: acceptance rate, latency per stage, output validity      |
+The service is stateless: it stores no conversations. The caller sends the
+conversation so far with every request and keeps the results itself, so any
+task can serve any request. The demo UI keeps its history in the browser.
 
-A `conversation_id` of `null` starts a new conversation; the response/stream
-returns the generated id, which the frontend then reuses for follow-up
-messages in the same thread -- each `/generate` call resolves schema
-retrieval against the whole conversation so far (not just the latest
-message) and includes prior turns in the prompt, so follow-ups read as
-revisions of the previous script rather than one-shot regenerations.
-`is_regenerate: true` re-runs the last user message without adding a
-duplicate user turn, appending a fresh assistant message instead.
+| Method | Path                  | Description                                                              |
+|--------|-----------------------|--------------------------------------------------------------------------|
+| POST   | `/v1/generate`        | `{ messages }` → full response, non-streaming                            |
+| POST   | `/v1/generate/stream` | `{ messages }` → the same, as Server-Sent Events                          |
+| GET    | `/v1/schema`          | Reference schema tables/columns                                          |
+| GET    | `/health`             | Liveness: the process is up. No dependencies                             |
+| GET    | `/ready`              | Readiness: config present, reference DB and both collections loaded (503 if not) |
+
+`/health` and `/ready` are probes, not API, so they are not versioned.
+
+### Request body
+
+`messages` is the conversation so far, oldest first, ending with the new
+request:
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "Process payroll for a given pay period" },
+    { "role": "assistant", "kind": "generation", "full_script": "-- SECTION: PRE_VALIDATION\n..." },
+    { "role": "user", "content": "Also skip employees who are on leave" }
+  ]
+}
+```
+
+| Message | Fields |
+|---|---|
+| user | `content`: the request, non-blank, at most `MAX_PROMPT_CHARS` (8000) |
+| assistant, a script | `kind: "generation"` (the default), `full_script`: the script the service returned |
+| assistant, a rejection | `kind: "rejected"`, `content`: the reason the service gave |
+
+The last message must be from the user. Unknown fields are rejected, so send
+only these -- not `sections` or `retrieved_context` from an earlier response.
+**To regenerate** an answer, resend the conversation without its last
+assistant message.
+
+Schema retrieval runs against every user message in the conversation, not
+just the latest, and earlier turns go into the prompt, so a follow-up reads
+as a revision of the previous script rather than a fresh one.
 
 Every request first passes a classification gate (`classify_request` in
 `app/rag/generator.py`): a small, fast Gemini call that checks whether the
 prompt is actually asking for a database stored procedure at all. Prompts
 like "write a python program to add two numbers" get rejected before any
 retrieval or generation happens, rather than producing an irrelevant script.
-The gate is passed the prior conversation's user messages (not just the
-latest one), so a short follow-up like "make it handle nulls too" is judged
-in context rather than in isolation -- an earlier version only saw the
-latest message and incorrectly rejected legitimate follow-ups; see
-`evals/test_classifier_eval.py` for the regression cases that guard against
-that coming back. A rejected request still gets persisted (as an assistant
-message with `kind: "rejected"`, `content` holding the reason) so the
-conversation history shows why nothing was generated.
+The gate sees the earlier user messages too, so a short follow-up like "make
+it handle nulls too" is judged in context rather than in isolation -- an
+earlier version only saw the latest message and incorrectly rejected
+legitimate follow-ups; see `evals/test_classifier_eval.py` for the
+regression cases that guard against that coming back. Keep a rejection in
+the conversation you send back (as `kind: "rejected"`), so later turns know
+why nothing was generated.
 
-`POST /generate` response shape when the request passes the gate
-(`/generate/stream`'s final `done` SSE event carries the same fields, plus
-`conversation_id`):
+### Responses
+
+`POST /v1/generate` when the request passes the gate (the stream's final
+`done` event carries the same fields except `rejected` and `prompt`):
 
 ```json
 {
-  "conversation_id": "...",
-  "message_id": "...",
+  "rejected": false,
   "prompt": "...",
   "full_script": "...",
   "sections": {
@@ -164,20 +183,17 @@ conversation history shows why nothing was generated.
 }
 ```
 
-If the gate rejects the request, `POST /generate` instead returns:
+If the gate rejects the request:
 
 ```json
-{ "conversation_id": "...", "message_id": "...", "rejected": true, "reason": "..." }
+{ "rejected": true, "reason": "..." }
 ```
 
-### Streaming protocol (`/generate/stream`)
+### Streaming protocol (`/v1/generate/stream`)
 
 Server-Sent Events, in order:
 
 ```
-event: start
-data: {"conversation_id": "..."}
-
 event: status        (checking_request -> retrieving_context -> drafting_script -> validating_script)
 data: {"stage": "..."}
 
@@ -185,7 +201,7 @@ event: chunk        (repeated as text arrives, between the drafting_script
 data: {"text": "..."}   and validating_script status events)
 
 event: done
-data: { ...full response shape above... }
+data: { full_script, sections, retrieved_context, sql_valid, sql_issues }
 ```
 
 or, if the classification gate rejects the request, `status: checking_request`
@@ -193,7 +209,7 @@ is followed directly by:
 
 ```
 event: rejected
-data: {"conversation_id": "...", "message_id": "...", "reason": "..."}
+data: {"reason": "..."}
 ```
 
 with no `retrieving_context` / `drafting_script` / `chunk` / `done` events at
@@ -202,13 +218,13 @@ all -- retrieval and generation never run for a rejected request.
 `status` events mark real pipeline transitions (not a fake progress bar) --
 `checking_request` for the classification gate, `retrieving_context` while
 embedding the prompt and querying Chroma, `drafting_script` for the main
-Gemini call (this is the long step; Gemini's reasoning time before the first
-token can be 30-60s), `validating_script` right before the final structural
-check.
+Gemini call (the long step), `validating_script` right before the final
+structural check.
 
 or `event: error` with `data: {"code": "...", "message": "...", "request_id": "..."}`
 in place of `done` if generation fails partway through. `code` is one of the
 stable error codes below; the raw upstream error never reaches the client.
+The request ID is also in the `X-Request-ID` response header.
 
 While the model is thinking the stream sends an SSE comment line,
 `: keepalive`, every `SSE_HEARTBEAT_S` (default 15s), so a load balancer
@@ -221,11 +237,12 @@ Authentication is out of scope by design: in a real deployment the service
 sits behind an ALB or API gateway that authenticates callers first. What the
 service itself does:
 
-**Request validation.** `prompt` is required, non-blank and at most
-`MAX_PROMPT_CHARS` (default 8000) characters; unknown fields are rejected;
-`conversation_id` is length- and charset-bounded. Bodies over
-`MAX_REQUEST_BYTES` (default 64 KB) get a 413 before they are parsed. A
-validation failure reports which field and why -- not the input itself.
+**Request validation.** Each message must match its role (see "Request
+body"); user messages are non-blank and at most `MAX_PROMPT_CHARS` (default
+8000) characters; unknown fields are rejected. Bodies over
+`MAX_REQUEST_BYTES` (default 256 KB -- about 25 turns, since every earlier
+script is resent) get a 413 before they are parsed. A validation failure
+reports which field and why -- not the input itself.
 
 **Typed errors.** Every error body is
 `{"error": {"code", "message", "request_id", "details"?}}`, with no stack
@@ -234,8 +251,8 @@ trace or upstream payload. Codes are stable; messages may change.
 | Code | Status | When |
 |---|---|---|
 | `invalid_request` | 422 | body failed validation |
-| `bad_request` | 400 | well-formed but unusable (e.g. nothing to regenerate) |
-| `not_found` | 404 | unknown route or conversation |
+| `bad_request` | 400 | well-formed but unusable |
+| `not_found` | 404 | unknown route |
 | `request_too_large` | 413 | body over `MAX_REQUEST_BYTES` |
 | `rate_limited` | 429 | in-process limiter refused it (`Retry-After` set) |
 | `not_configured` | 503 | `GEMINI_API_KEY` missing |
@@ -337,11 +354,8 @@ CloudWatch turns into metrics with no agent or extra port. Namespace
 `SPGenerator`, dimensions `Endpoint` x `Outcome` (accepted / rejected /
 error), metrics `Requests`, `TotalLatency`, `ClassifyLatency`,
 `RetrievalLatency`, `GenerationLatency`, `SqlValid`, `RetrievedTables`.
-Off AWS they are ordinary log lines.
-
-The older SQLite telemetry store (`telemetry_events` in `data/app.db`, read
-by `GET /metrics`) still records the same events; it goes when the service
-becomes stateless.
+Off AWS they are ordinary log lines. There is no `/metrics` endpoint and no
+local telemetry store.
 
 ## Testing & evals
 
@@ -349,10 +363,11 @@ Two separate layers, on purpose -- they test different things and have very
 different costs:
 
 - **`tests/`** -- fast, deterministic, offline unit tests (no network, no API
-  key required). Covers `section_parser`, `validator`, `conversation_store`
-  (including a regression test for a foreign-key-ordering bug that
-  previously made `DELETE /conversations/{id}` 500), and `telemetry_store`'s
-  aggregation math. This is what `pytest` runs by default.
+  key required). Covers `section_parser`, `validator`, the pattern templates,
+  thinking-level settings and fallback, and the `/v1` API end to end with
+  both Gemini call sites faked: the request contract, history reaching the
+  prompt, typed errors, retries, rate limiting, SSE shape and heartbeat.
+  This is what `pytest` runs by default.
 - **`evals/`** -- RAG *quality* evals against a small golden set, calling the
   real Gemini API (real cost, ~30s total). `test_classifier_eval.py` checks
   the classification gate's accuracy on a labeled set of on-topic/off-topic

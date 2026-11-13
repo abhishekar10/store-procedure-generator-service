@@ -12,18 +12,3 @@ def _clean_settings_cache():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
-
-
-@pytest.fixture
-def isolated_app_db(tmp_path, monkeypatch):
-    """Redirects the app database to a throwaway temp file for the duration of
-    a test, so store tests never touch real data.
-
-    Configuration now comes from the environment rather than module-level
-    constants, so this overrides the env vars and rebuilds the cached Settings
-    -- the same path production uses.
-    """
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("APP_DB_PATH", str(tmp_path / "app.db"))
-    get_settings.cache_clear()
-    yield tmp_path / "app.db"

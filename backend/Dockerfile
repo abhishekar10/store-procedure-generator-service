@@ -78,8 +78,8 @@ WORKDIR /srv
 COPY --from=deps    --chown=root:root /opt/venv            /opt/venv
 COPY --from=corpus  --chown=root:root /build/app           /srv/app
 COPY --from=corpus  --chown=root:root /build/db            /srv/db
-# The corpus is read-only at runtime, but app.db is still written here until
-# conversation storage is removed, so this one directory belongs to the app user.
+# The service stores nothing at runtime. This directory stays app-owned only
+# because Chroma opens its SQLite store read-write; a read-only store is untested.
 COPY --from=corpus  --chown=app:app   /build/data          /srv/data
 
 USER app
@@ -89,9 +89,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"]
 
-# Single worker: generation is a 44-232s upstream call, so throughput comes
-# from task count, not from workers inside one container. Generation runs on
-# threads, so one worker serves many concurrent requests.
+# Single worker: generation is a long upstream call (~15s at thinking level
+# low, minutes at auto), so throughput comes from task count, not from workers
+# inside one container. Generation runs on threads, so one worker serves many
+# concurrent requests.
 #
 # On SIGTERM uvicorn stops accepting and gives in-flight requests up to
 # GRACEFUL_SHUTDOWN_S to finish. ECS SIGKILLs at the task's stopTimeout

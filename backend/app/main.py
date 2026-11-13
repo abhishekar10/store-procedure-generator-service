@@ -1,5 +1,8 @@
-"""FastAPI app wiring together the RAG pipeline, reference schema, and
-chat conversation storage.
+"""FastAPI app wiring together the RAG pipeline and the reference schema.
+
+Stateless: the service stores no conversations. A caller sends the whole
+conversation so far in each request and keeps the results itself, so any
+task can serve any request and nothing needs a database.
 
 Authentication is deliberately out of scope: in a real deployment this
 service sits behind an ALB or API gateway, which authenticates callers
@@ -14,8 +17,9 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
+from typing import Literal
 
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -23,17 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import Settings, get_settings
-from app.db.conversation_store import (
-    add_assistant_message,
-    add_rejected_message,
-    add_user_message,
-    create_conversation,
-    delete_conversation,
-    get_conversation,
-    list_conversations,
-)
 from app.db.reference_schema import list_tables
-from app.db.telemetry_store import get_metrics_summary, log_event
 from app.errors import ServiceError, error_body, to_service_error
 from app.middleware import RequestContextMiddleware
 from app.observability import configure_logging, emit_generation_metrics, request_id_var
@@ -82,7 +76,7 @@ app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_allow_origins,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST"],
     allow_headers=["content-type", "x-request-id"],
     expose_headers=["x-request-id", "retry-after"],
 )
@@ -148,46 +142,74 @@ def ready(response: Response):
     return {"status": "ready" if ok else "not_ready", "checks": checks}
 
 
-def _check_prompt(prompt: str) -> str:
-    limit = get_settings().max_prompt_chars
-    if len(prompt) > limit:
-        raise ValueError(f"must be at most {limit} characters")
-    return prompt
+class Message(BaseModel):
+    """One turn of the conversation so far, as the caller keeps it. Only what
+    the model needs: the user's request, or what the service answered."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["user", "assistant"]
+    kind: Literal["generation", "rejected"] | None = Field(
+        default=None,
+        description="Assistant messages only: a script (`generation`, the default) or a `rejected` request.",
+    )
+    content: str | None = Field(
+        default=None,
+        description="User messages: the request (at most MAX_PROMPT_CHARS). Rejected assistant messages: the reason.",
+    )
+    full_script: str | None = Field(default=None, description="Assistant `generation` messages: the script returned.")
+
+    @model_validator(mode="after")
+    def _shape_matches_role(self) -> "Message":
+        if self.role == "user":
+            if self.kind is not None or self.full_script is not None:
+                raise ValueError("a user message has only content")
+            if not (self.content or "").strip():
+                raise ValueError("content must not be blank")
+            limit = get_settings().max_prompt_chars
+            if len(self.content) > limit:
+                raise ValueError(f"content must be at most {limit} characters")
+            return self
+        self.kind = self.kind or "generation"
+        if self.kind == "generation" and not (self.full_script or "").strip():
+            raise ValueError("an assistant generation needs full_script")
+        if self.kind == "rejected" and not (self.content or "").strip():
+            raise ValueError("an assistant rejection needs content (the reason)")
+        return self
+
+
+_EXAMPLE_FIRST_TURN = {"messages": [{"role": "user", "content": "Process payroll for a given pay period"}]}
+_EXAMPLE_FOLLOW_UP = {
+    "messages": [
+        {"role": "user", "content": "Process payroll for a given pay period"},
+        {"role": "assistant", "kind": "generation", "full_script": "-- SECTION: PRE_VALIDATION\n..."},
+        {"role": "user", "content": "Also skip employees who are on leave"},
+    ]
+}
 
 
 class GenerateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """The conversation so far, ending with the new request. To regenerate
+    an answer, resend the conversation without its last assistant message."""
 
-    prompt: str = Field(min_length=1, description="Plain-English request. At most MAX_PROMPT_CHARS (default 8000).")
-    conversation_id: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9-]+$")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [_EXAMPLE_FIRST_TURN, _EXAMPLE_FOLLOW_UP]})
 
-    @field_validator("prompt")
+    messages: list[Message] = Field(min_length=1)
+
+    @field_validator("messages")
     @classmethod
-    def _prompt_not_blank_or_huge(cls, prompt: str) -> str:
-        if not prompt.strip():
-            raise ValueError("must not be blank")
-        return _check_prompt(prompt)
+    def _ends_with_a_request(cls, messages: list[Message]) -> list[Message]:
+        if messages[-1].role != "user":
+            raise ValueError("the last message must be the user's request")
+        return messages
 
+    @property
+    def prompt(self) -> str:
+        return self.messages[-1].content
 
-class StreamRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    prompt: str = Field(default="", description="Required unless is_regenerate. At most MAX_PROMPT_CHARS.")
-    conversation_id: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9-]+$")
-    is_regenerate: bool = False
-
-    @field_validator("prompt")
-    @classmethod
-    def _prompt_not_huge(cls, prompt: str) -> str:
-        return _check_prompt(prompt)
-
-    @model_validator(mode="after")
-    def _prompt_required_unless_regenerating(self) -> "StreamRequest":
-        # A regenerate replays the last stored user message, so the demo UI
-        # sends prompt="". Everything else needs a real prompt.
-        if not self.is_regenerate and not self.prompt.strip():
-            raise ValueError("prompt must not be blank")
-        return self
+    @property
+    def prior_messages(self) -> list[dict]:
+        return [message.model_dump(exclude_none=True) for message in self.messages[:-1]]
 
 
 _limiter: TokenBucketLimiter | None = None
@@ -221,39 +243,14 @@ def _record(
     endpoint: str,
     *,
     outcome: str,
-    prompt: str,
-    conversation_id: str | None,
-    message_id: str | None,
-    is_regenerate: bool,
     total_latency_ms: float,
     timings: dict[str, float] | None = None,
     tables: list[dict] | None = None,
-    pattern_count: int | None = None,
     sql_valid: bool | None = None,
-    sql_issues: list[str] | None = None,
-    rejection_reason: str | None = None,
     error_code: str | None = None,
 ) -> None:
-    """One place that records a finished generation request: the SQLite
-    telemetry store (removed in Phase 3) and the CloudWatch EMF metric line."""
+    """One CloudWatch EMF metric line per finished generation request."""
     timings = timings or {}
-    log_event(
-        conversation_id=conversation_id,
-        message_id=message_id,
-        prompt=prompt,
-        is_regenerate=is_regenerate,
-        accepted=outcome == "accepted",
-        rejection_reason=rejection_reason,
-        retrieved_tables=tables,
-        pattern_count=pattern_count,
-        classify_latency_ms=timings.get("classify"),
-        retrieval_latency_ms=timings.get("retrieval"),
-        generation_latency_ms=timings.get("generation"),
-        total_latency_ms=total_latency_ms,
-        sql_valid=sql_valid,
-        sql_issues=sql_issues,
-        error_message=error_code,
-    )
     emit_generation_metrics(
         endpoint=endpoint,
         outcome=outcome,
@@ -278,89 +275,58 @@ def _log_failure(exc: BaseException, error: ServiceError) -> None:
         )
 
 
-def _prior_messages_for(conversation_id: str | None) -> list[dict]:
-    if conversation_id is None:
-        return []
-    conversation = get_conversation(conversation_id)
-    return conversation["messages"] if conversation else []
-
-
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-@app.post(
+v1 = APIRouter(prefix="/v1")
+
+
+def _script_result(result: dict) -> dict:
+    return {
+        "full_script": result["full_script"],
+        "sections": result["sections"],
+        "retrieved_context": serialize_context(result["retrieved_context"]),
+        "sql_valid": result["sql_valid"],
+        "sql_issues": result["sql_issues"],
+    }
+
+
+@v1.post(
     "/generate",
     tags=["Generation"],
-    summary="Generate a stored procedure from a plain-English prompt (non-streaming)",
+    summary="Generate a stored procedure from the conversation so far (non-streaming)",
     dependencies=[Depends(enforce_rate_limit)],
 )
 def generate(request: GenerateRequest):
-    """Runs synchronously on FastAPI's threadpool, so a multi-minute model
-    call does not block the event loop. Prefer /generate/stream behind a load
-    balancer: this endpoint sends nothing until the script is done, so the
-    connection sits idle for the whole generation."""
-    conversation_id = request.conversation_id
-    prior_messages = _prior_messages_for(conversation_id)
+    """Runs synchronously on FastAPI's threadpool, so the model call does not
+    block the event loop. Prefer /v1/generate/stream behind a load balancer:
+    this endpoint sends nothing until the script is done."""
     start_time = time.monotonic()
 
     def elapsed_ms() -> float:
         return (time.monotonic() - start_time) * 1000
 
-    if conversation_id is None:
-        conversation_id = create_conversation(request.prompt)
-    add_user_message(conversation_id, request.prompt)
-
-    common = {"prompt": request.prompt, "conversation_id": conversation_id, "is_regenerate": False}
     try:
-        result = generate_stored_procedure(request.prompt, prior_messages=prior_messages)
+        result = generate_stored_procedure(request.prompt, prior_messages=request.prior_messages)
     except RequestRejected as exc:
-        message_id = add_rejected_message(conversation_id, exc.reason)
-        _record(
-            "generate", outcome="rejected", message_id=message_id, total_latency_ms=elapsed_ms(),
-            timings=exc.timings_ms, rejection_reason=exc.reason, **common,
-        )
-        return {
-            "conversation_id": conversation_id,
-            "message_id": message_id,
-            "rejected": True,
-            "reason": exc.reason,
-        }
+        _record("generate", outcome="rejected", total_latency_ms=elapsed_ms(), timings=exc.timings_ms)
+        return {"rejected": True, "reason": exc.reason}
     except Exception as exc:
         error = to_service_error(exc)
         _log_failure(exc, error)
-        _record(
-            "generate", outcome="error", message_id=None, total_latency_ms=elapsed_ms(),
-            error_code=error.code, **common,
-        )
+        _record("generate", outcome="error", total_latency_ms=elapsed_ms(), error_code=error.code)
         raise error from exc
 
-    retrieved_context = serialize_context(result["retrieved_context"])
-    message_id = add_assistant_message(
-        conversation_id,
-        full_script=result["full_script"],
-        sections=result["sections"],
-        retrieved_context=retrieved_context,
-        sql_valid=result["sql_valid"],
-        sql_issues=result["sql_issues"],
-    )
     _record(
-        "generate", outcome="accepted", message_id=message_id, total_latency_ms=elapsed_ms(),
-        timings=result["timings_ms"], tables=retrieved_tables(result["retrieved_context"]),
-        pattern_count=len(retrieved_context["pattern_chunks"]), sql_valid=result["sql_valid"],
-        sql_issues=result["sql_issues"], **common,
+        "generate",
+        outcome="accepted",
+        total_latency_ms=elapsed_ms(),
+        timings=result["timings_ms"],
+        tables=retrieved_tables(result["retrieved_context"]),
+        sql_valid=result["sql_valid"],
     )
-
-    return {
-        "conversation_id": conversation_id,
-        "message_id": message_id,
-        "prompt": result["prompt"],
-        "full_script": result["full_script"],
-        "sections": result["sections"],
-        "retrieved_context": retrieved_context,
-        "sql_valid": result["sql_valid"],
-        "sql_issues": result["sql_issues"],
-    }
+    return {"rejected": False, "prompt": result["prompt"], **_script_result(result)}
 
 
 _HEARTBEAT = ": keepalive\n\n"
@@ -421,106 +387,43 @@ async def _run_with_heartbeat(make_events: Callable[[], Iterator[str]], interval
         cancelled.set()
 
 
-@app.post(
+@v1.post(
     "/generate/stream",
     tags=["Generation"],
     summary="Generate or revise a stored procedure, streamed as Server-Sent Events",
     dependencies=[Depends(enforce_rate_limit)],
 )
-def generate_stream(request: StreamRequest):
-    conversation_id = request.conversation_id
-
-    if request.is_regenerate:
-        if conversation_id is None:
-            raise ServiceError(400, "bad_request", "conversation_id is required to regenerate")
-        conversation = get_conversation(conversation_id)
-        if conversation is None:
-            raise ServiceError(404, "not_found", "Conversation not found")
-
-        messages = conversation["messages"]
-        if not messages or messages[-1]["role"] != "assistant":
-            raise ServiceError(400, "bad_request", "Nothing to regenerate")
-
-        last_user_message = next((m for m in reversed(messages) if m["role"] == "user"), None)
-        if last_user_message is None:
-            raise ServiceError(400, "bad_request", "Nothing to regenerate")
-
-        user_prompt = last_user_message["content"]
-        prior_messages = messages[: messages.index(last_user_message)]
-    else:
-        user_prompt = request.prompt
-        prior_messages = _prior_messages_for(conversation_id)
-        if conversation_id is None:
-            conversation_id = create_conversation(user_prompt)
-        add_user_message(conversation_id, user_prompt)
-
+def generate_stream(request: GenerateRequest):
     def event_stream() -> Iterator[str]:
         overall_start = time.monotonic()
 
         def elapsed_ms() -> float:
             return (time.monotonic() - overall_start) * 1000
 
-        common = {"prompt": user_prompt, "conversation_id": conversation_id, "is_regenerate": request.is_regenerate}
-
-        yield _sse("start", {"conversation_id": conversation_id})
         try:
-            for event in stream_stored_procedure(user_prompt, prior_messages=prior_messages):
+            for event in stream_stored_procedure(request.prompt, prior_messages=request.prior_messages):
                 if event["type"] == "status":
                     yield _sse("status", {"stage": event["stage"]})
-                    continue
-
-                if event["type"] == "chunk":
+                elif event["type"] == "chunk":
                     yield _sse("chunk", {"text": event["text"]})
-                    continue
-
-                if event["type"] == "rejected":
-                    message_id = add_rejected_message(conversation_id, event["reason"])
+                elif event["type"] == "rejected":
                     _record(
-                        "generate_stream", outcome="rejected", message_id=message_id,
-                        total_latency_ms=elapsed_ms(), timings=event["timings_ms"],
-                        rejection_reason=event["reason"], **common,
+                        "generate_stream", outcome="rejected", total_latency_ms=elapsed_ms(),
+                        timings=event["timings_ms"],
                     )
-                    yield _sse(
-                        "rejected",
-                        {"conversation_id": conversation_id, "message_id": message_id, "reason": event["reason"]},
-                    )
+                    yield _sse("rejected", {"reason": event["reason"]})
                     return
-
-                retrieved_context = serialize_context(event["retrieved_context"])
-                message_id = add_assistant_message(
-                    conversation_id,
-                    full_script=event["full_script"],
-                    sections=event["sections"],
-                    retrieved_context=retrieved_context,
-                    sql_valid=event["sql_valid"],
-                    sql_issues=event["sql_issues"],
-                )
-                _record(
-                    "generate_stream", outcome="accepted", message_id=message_id,
-                    total_latency_ms=elapsed_ms(), timings=event["timings_ms"],
-                    tables=retrieved_tables(event["retrieved_context"]),
-                    pattern_count=len(retrieved_context["pattern_chunks"]),
-                    sql_valid=event["sql_valid"], sql_issues=event["sql_issues"], **common,
-                )
-                yield _sse(
-                    "done",
-                    {
-                        "conversation_id": conversation_id,
-                        "message_id": message_id,
-                        "full_script": event["full_script"],
-                        "sections": event["sections"],
-                        "retrieved_context": retrieved_context,
-                        "sql_valid": event["sql_valid"],
-                        "sql_issues": event["sql_issues"],
-                    },
-                )
+                else:
+                    _record(
+                        "generate_stream", outcome="accepted", total_latency_ms=elapsed_ms(),
+                        timings=event["timings_ms"], tables=retrieved_tables(event["retrieved_context"]),
+                        sql_valid=event["sql_valid"],
+                    )
+                    yield _sse("done", _script_result(event))
         except Exception as exc:  # noqa: BLE001 -- surfaced to the client as a typed SSE error event
             error = to_service_error(exc)
             _log_failure(exc, error)
-            _record(
-                "generate_stream", outcome="error", message_id=None, total_latency_ms=elapsed_ms(),
-                error_code=error.code, **common,
-            )
+            _record("generate_stream", outcome="error", total_latency_ms=elapsed_ms(), error_code=error.code)
             yield _sse("error", error_body(error, request_id_var.get())["error"])
 
     return StreamingResponse(
@@ -531,43 +434,9 @@ def generate_stream(request: StreamRequest):
     )
 
 
-@app.get("/conversations", tags=["Conversations"], summary="List chat conversations")
-def get_conversations():
-    return {"conversations": list_conversations()}
-
-
-@app.get(
-    "/conversations/{conversation_id}",
-    tags=["Conversations"],
-    summary="Get a conversation with its full message history",
-)
-def get_conversation_detail(conversation_id: str):
-    conversation = get_conversation(conversation_id)
-    if conversation is None:
-        raise ServiceError(404, "not_found", "Conversation not found")
-    return conversation
-
-
-@app.delete(
-    "/conversations/{conversation_id}",
-    tags=["Conversations"],
-    summary="Delete a conversation and its messages",
-)
-def delete_conversation_route(conversation_id: str):
-    if not delete_conversation(conversation_id):
-        raise ServiceError(404, "not_found", "Conversation not found")
-    return {"status": "deleted"}
-
-
-@app.get("/schema", tags=["Reference Schema"], summary="List reference schema tables and columns")
+@v1.get("/schema", tags=["Reference Schema"], summary="List reference schema tables and columns")
 def get_schema():
     return {"tables": list_tables()}
 
 
-@app.get(
-    "/metrics",
-    tags=["Admin"],
-    summary="Basic aggregate telemetry: acceptance rate, latency per pipeline stage, output validity",
-)
-def get_metrics():
-    return get_metrics_summary()
+app.include_router(v1)

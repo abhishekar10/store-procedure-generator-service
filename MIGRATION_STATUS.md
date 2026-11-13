@@ -427,6 +427,18 @@ afterwards. Never leave anything running that costs money without saying so.
 
 ### Phase 3 — stateless and pluggable
 
+**Step 1 done — stateless backend.** Both stores, `/conversations*`, `/metrics` and the
+`isolated_app_db` fixture are gone; `DATA_DIR`/`APP_DB_PATH` settings removed. The API is
+`/v1/generate`, `/v1/generate/stream`, `/v1/schema` (probes stay unversioned). Body:
+`messages: [{role, content?, kind?, full_script?}]`, last one the user's; validated per role,
+unknown fields refused, so the old `{prompt, conversation_id}` shape gets a 422. The SSE
+`start` event is gone (it only carried `conversation_id`); `rejected` and `done` no longer
+carry ids. `MAX_REQUEST_BYTES` raised 64 KB → 256 KB because the caller now resends every
+earlier script (~8 KB each): about 25 turns. API tests ported to `/v1` (42 in
+`test_api_hardening.py`). **The frontend still calls the old routes until step 2.**
+
+Original plan for this phase:
+
 - **Delete `app/db/conversation_store.py` and `app/db/telemetry_store.py`.** Remove
   `GET /conversations`, `GET /conversations/{id}`, `DELETE /conversations/{id}` and
   `GET /metrics`. `_prior_messages_for` goes. `get_last_user_message` is already dead
