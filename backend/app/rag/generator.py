@@ -1,12 +1,18 @@
 """Assembles the RAG prompt from retrieved context and prior conversation
 turns, then calls Gemini to generate or revise a stored procedure."""
 
+import logging
 import re
+import time
 from collections.abc import Iterator
+from typing import Literal
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.config import get_settings
+from app.errors import UpstreamTimeout
+from app.observability import prompt_fingerprint
+from app.rag.llm import build_chat_model, call_with_retry, should_retry_generation
 from app.rag.retriever import RetrievedChunk, retrieve_context
 from app.rag.section_parser import parse_sections
 from app.rag.validator import validate_script
@@ -37,10 +43,18 @@ _REASON_RE = re.compile(r"REASON:\s*(.+)", re.IGNORECASE)
 _DEFAULT_REJECTION_REASON = "This doesn't look like a request for a database stored procedure."
 
 
+logger = logging.getLogger(__name__)
+
+
 class RequestRejected(Exception):
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, timings_ms: dict[str, float] | None = None):
         self.reason = reason
+        self.timings_ms = timings_ms or {}
         super().__init__(reason)
+
+
+def _ms_since(start: float) -> float:
+    return round((time.monotonic() - start) * 1000, 1)
 
 SYSTEM_PROMPT = """You are a senior database engineer generating a production-grade \
 PostgreSQL (PL/pgSQL) stored procedure.
@@ -187,13 +201,10 @@ def build_prompt(
     return "\n\n".join(parts)
 
 
-def _build_llm() -> ChatGoogleGenerativeAI:
-    settings = get_settings()
-    return ChatGoogleGenerativeAI(
-        model=settings.generation_model,
-        google_api_key=settings.require_gemini_api_key(),
-        temperature=0.2,
-    )
+def _build_llm(purpose: Literal["classify", "generate"] = "generate") -> ChatGoogleGenerativeAI:
+    """Both LLM call sites (classifier and generation) build their client
+    here, so timeouts, retries and test fakes cover both."""
+    return build_chat_model(purpose)
 
 
 def _format_classifier_conversation_block(prior_messages: list[dict] | None) -> str:
@@ -212,12 +223,7 @@ def classify_request(user_prompt: str, prior_messages: list[dict] | None = None)
     so a short follow-up ("make it handle nulls too") is judged in the
     context of an already-established stored-procedure conversation, not in
     isolation."""
-    settings = get_settings()
-    llm = ChatGoogleGenerativeAI(
-        model=settings.generation_model,
-        google_api_key=settings.require_gemini_api_key(),
-        temperature=0,
-    )
+    llm = _build_llm("classify")
     conversation_block = _format_classifier_conversation_block(prior_messages)
     prompt = CLASSIFIER_PROMPT.format(conversation_block=conversation_block, user_prompt=user_prompt)
     response_text = _extract_text(llm.invoke(prompt).content)
@@ -230,20 +236,73 @@ def classify_request(user_prompt: str, prior_messages: list[dict] | None = None)
     return is_valid, reason
 
 
+def _classify(user_prompt: str, prior_messages: list[dict] | None, timings: dict[str, float]) -> tuple[bool, str]:
+    start = time.monotonic()
+    is_valid, reason = classify_request(user_prompt, prior_messages)
+    timings["classify"] = _ms_since(start)
+    logger.info(
+        "classification",
+        extra={
+            "accepted": is_valid,
+            # The classifier's reason paraphrases the request, so it is kept
+            # only for rejections, where it is what you need to tune the gate.
+            "reason": None if is_valid else reason,
+            "latency_ms": timings["classify"],
+            "prior_messages": len(prior_messages or []),
+            **prompt_fingerprint(user_prompt),
+        },
+    )
+    logger.debug("classification.prompt", extra={"prompt": user_prompt})
+    return is_valid, reason
+
+
 def _retrieve_and_build_prompt(
-    user_prompt: str, prior_messages: list[dict] | None, top_k: int | None
+    user_prompt: str, prior_messages: list[dict] | None, top_k: int | None, timings: dict[str, float]
 ) -> tuple[str, dict[str, list[RetrievedChunk]]]:
+    start = time.monotonic()
     prior_messages = prior_messages or []
     prior_user_texts = [m["content"] for m in prior_messages if m["role"] == "user"]
     retrieval_query = "\n".join([*prior_user_texts, user_prompt])
 
     context = retrieve_context(retrieval_query, top_k=top_k)
     prompt = build_prompt(user_prompt, context, prior_messages)
+    timings["retrieval"] = _ms_since(start)
+    logger.info(
+        "retrieval",
+        extra={
+            "latency_ms": timings["retrieval"],
+            "retrieved_tables": retrieved_tables(context),
+            "pattern_count": len(context["pattern_chunks"]),
+            "llm_prompt_chars": len(prompt),
+        },
+    )
     return prompt, context
 
 
-def _finalize(user_prompt: str, full_script: str, context: dict[str, list[RetrievedChunk]]) -> dict:
+def retrieved_tables(context: dict[str, list[RetrievedChunk]]) -> list[dict]:
+    return [
+        {"table_name": chunk.metadata.get("table_name"), "score": _round(chunk.score)}
+        for chunk in context["schema_chunks"]
+    ]
+
+
+def _round(score: float | None) -> float | None:
+    return None if score is None else round(score, 4)
+
+
+def _finalize(
+    user_prompt: str, full_script: str, context: dict[str, list[RetrievedChunk]], timings: dict[str, float]
+) -> dict:
     sql_valid, sql_issues = validate_script(full_script)
+    logger.info(
+        "generation",
+        extra={
+            "latency_ms": timings.get("generation"),
+            "script_chars": len(full_script),
+            "sql_valid": sql_valid,
+            "sql_issues": sql_issues,
+        },
+    )
     return {
         "prompt": user_prompt,
         "full_script": full_script,
@@ -251,19 +310,62 @@ def _finalize(user_prompt: str, full_script: str, context: dict[str, list[Retrie
         "retrieved_context": context,
         "sql_valid": sql_valid,
         "sql_issues": sql_issues,
+        "timings_ms": timings,
     }
 
 
 def generate_stored_procedure(
     user_prompt: str, prior_messages: list[dict] | None = None, top_k: int | None = None
 ) -> dict:
-    is_valid, reason = classify_request(user_prompt, prior_messages)
+    timings: dict[str, float] = {}
+    is_valid, reason = _classify(user_prompt, prior_messages, timings)
     if not is_valid:
-        raise RequestRejected(reason)
+        raise RequestRejected(reason, timings)
 
-    prompt, context = _retrieve_and_build_prompt(user_prompt, prior_messages, top_k)
-    full_script = _extract_text(_build_llm().invoke(prompt).content)
-    return _finalize(user_prompt, full_script, context)
+    prompt, context = _retrieve_and_build_prompt(user_prompt, prior_messages, top_k, timings)
+
+    settings = get_settings()
+    start = time.monotonic()
+    response = call_with_retry(
+        lambda: _build_llm("generate").invoke(prompt),
+        attempts=settings.generation_attempts,
+    )
+    timings["generation"] = _ms_since(start)
+    return _finalize(user_prompt, _extract_text(response.content), context, timings)
+
+
+def _stream_generation(prompt: str) -> Iterator[str]:
+    """Streams generated text. A failure is retried only while nothing has
+    been emitted yet (once text has reached the caller there is no clean way
+    to restart), and only under the same fast-429/5xx rule as invoke.
+
+    The client's read timeout bounds each gap between chunks; the deadline
+    here bounds the whole stream, which a slow trickle could otherwise
+    stretch indefinitely."""
+    settings = get_settings()
+    deadline = time.monotonic() + settings.generation_timeout_s
+
+    for attempt in range(1, settings.generation_attempts + 1):
+        started = time.monotonic()
+        emitted = False
+        try:
+            for chunk in _build_llm("generate").stream(prompt):
+                if time.monotonic() > deadline:
+                    raise UpstreamTimeout(f"generation exceeded {settings.generation_timeout_s}s")
+                text = _extract_text(chunk.content)
+                if text:
+                    emitted = True
+                    yield text
+            return
+        except UpstreamTimeout:
+            raise
+        except Exception as exc:
+            elapsed_s = time.monotonic() - started
+            if emitted or not should_retry_generation(
+                exc, attempt=attempt, attempts=settings.generation_attempts, elapsed_s=elapsed_s
+            ):
+                raise
+            time.sleep(settings.generation_retry_backoff_s * attempt)
 
 
 def stream_stored_procedure(
@@ -273,24 +375,26 @@ def stream_stored_procedure(
     transition, {"type": "chunk", "text": ...} as text arrives, and finally a
     single {"type": "done", ...} with the full finalized result -- or a
     single {"type": "rejected", "reason": ...} in place of all of the above
-    if the request doesn't pass the classification gate."""
+    if the request doesn't pass the classification gate. Both terminal
+    events carry `timings_ms` per stage."""
+    timings: dict[str, float] = {}
+
     yield {"type": "status", "stage": "checking_request"}
-    is_valid, reason = classify_request(user_prompt, prior_messages)
+    is_valid, reason = _classify(user_prompt, prior_messages, timings)
     if not is_valid:
-        yield {"type": "rejected", "reason": reason}
+        yield {"type": "rejected", "reason": reason, "timings_ms": timings}
         return
 
     yield {"type": "status", "stage": "retrieving_context"}
-    prompt, context = _retrieve_and_build_prompt(user_prompt, prior_messages, top_k)
+    prompt, context = _retrieve_and_build_prompt(user_prompt, prior_messages, top_k, timings)
 
     yield {"type": "status", "stage": "drafting_script"}
+    start = time.monotonic()
     full_script = ""
-    for chunk in _build_llm().stream(prompt):
-        text = _extract_text(chunk.content)
-        if not text:
-            continue
+    for text in _stream_generation(prompt):
         full_script += text
         yield {"type": "chunk", "text": text}
+    timings["generation"] = _ms_since(start)
 
     yield {"type": "status", "stage": "validating_script"}
-    yield {"type": "done", **_finalize(user_prompt, full_script, context)}
+    yield {"type": "done", **_finalize(user_prompt, full_script, context, timings)}

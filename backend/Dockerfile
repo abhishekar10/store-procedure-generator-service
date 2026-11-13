@@ -89,6 +89,14 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"]
 
-# Single worker: generation is a 130-180s upstream call, so throughput comes
-# from task count, not from workers inside one container.
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --timeout-graceful-shutdown 30"]
+# Single worker: generation is a 44-232s upstream call, so throughput comes
+# from task count, not from workers inside one container. Generation runs on
+# threads, so one worker serves many concurrent requests.
+#
+# On SIGTERM uvicorn stops accepting and gives in-flight requests up to
+# GRACEFUL_SHUTDOWN_S to finish. ECS SIGKILLs at the task's stopTimeout
+# (default 30s, max 120s), so stopTimeout must sit above this value. A
+# generation longer than that is still cut off by a deploy: the cap is
+# ECS's, not ours. --no-access-log: the app logs one JSON line per request.
+ENV GRACEFUL_SHUTDOWN_S=110
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --no-access-log --timeout-graceful-shutdown ${GRACEFUL_SHUTDOWN_S}"]

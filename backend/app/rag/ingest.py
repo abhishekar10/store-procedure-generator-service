@@ -9,9 +9,9 @@ import json
 import sqlite3
 
 import chromadb
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from app.config import PATTERN_CATEGORIES, get_settings
+from app.rag.llm import build_embeddings
 
 
 def _load_table_metadata() -> dict:
@@ -66,42 +66,46 @@ def _build_pattern_chunks() -> tuple[list[str], list[str], list[dict]]:
     return ids, documents, metadatas
 
 
-def _replace_collection(client: chromadb.ClientAPI, name: str) -> chromadb.Collection:
-    existing_names = {collection.name for collection in client.list_collections()}
-    if name in existing_names:
-        client.delete_collection(name)
-    return client.get_or_create_collection(name, metadata={"hnsw:space": "cosine"})
+def _sync_collection(
+    client: chromadb.ClientAPI,
+    name: str,
+    ids: list[str],
+    documents: list[str],
+    metadatas: list[dict],
+    embeddings: list[list[float]],
+) -> chromadb.Collection:
+    """Makes the collection hold exactly these chunks, in place.
+
+    The old version deleted and recreated the collection on every run. Each
+    recreate mints new segment UUIDs and chromadb leaves the old segment
+    directories on disk: one local store had grown to 10 segment dirs / 13 MB
+    for 15 embeddings, with only 2 live. Upserting into the existing
+    collection and deleting only the ids that are gone keeps the same
+    segments, so repeated ingests do not grow the store.
+
+    Changing the embedding model changes the vector dimension, which an
+    existing collection rejects -- delete the vector store directory first.
+    """
+    collection = client.get_or_create_collection(name, metadata={"hnsw:space": "cosine"})
+    stale = set(collection.get(include=[])["ids"]) - set(ids)
+    if stale:
+        collection.delete(ids=sorted(stale))
+    collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+    return collection
 
 
 def run_ingest() -> None:
     settings = get_settings()
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=settings.embedding_model,
-        google_api_key=settings.require_gemini_api_key(),
-    )
+    embeddings = build_embeddings()
     client = chromadb.PersistentClient(path=str(settings.vector_store_dir))
 
-    schema_ids, schema_docs, schema_metadatas = _build_schema_chunks()
-    pattern_ids, pattern_docs, pattern_metadatas = _build_pattern_chunks()
-
-    schema_collection = _replace_collection(client, settings.schema_collection)
-    schema_collection.add(
-        ids=schema_ids,
-        documents=schema_docs,
-        metadatas=schema_metadatas,
-        embeddings=embeddings.embed_documents(schema_docs, task_type="retrieval_document"),
-    )
-
-    pattern_collection = _replace_collection(client, settings.pattern_collection)
-    pattern_collection.add(
-        ids=pattern_ids,
-        documents=pattern_docs,
-        metadatas=pattern_metadatas,
-        embeddings=embeddings.embed_documents(pattern_docs, task_type="retrieval_document"),
-    )
-
-    print(f"Embedded {schema_collection.count()} schema chunks into '{settings.schema_collection}'")
-    print(f"Embedded {pattern_collection.count()} pattern chunks into '{settings.pattern_collection}'")
+    for name, (ids, documents, metadatas) in (
+        (settings.schema_collection, _build_schema_chunks()),
+        (settings.pattern_collection, _build_pattern_chunks()),
+    ):
+        vectors = embeddings.embed_documents(documents, task_type="retrieval_document")
+        collection = _sync_collection(client, name, ids, documents, metadatas, vectors)
+        print(f"Embedded {collection.count()} chunks into '{name}'")
 
 
 if __name__ == "__main__":

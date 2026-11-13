@@ -17,6 +17,9 @@ services:
       secrets:
         - gemini_key
     image: sp-generator-api:local
+    # Match the image's graceful shutdown window, so `docker compose down`
+    # lets an in-flight generation finish rather than killing it at 10s.
+    stop_grace_period: 2m
     ports:
       - "8000:8000"
     environment:

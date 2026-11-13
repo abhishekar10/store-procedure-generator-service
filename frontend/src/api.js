@@ -32,7 +32,9 @@ function parseSSEBlock(block) {
  * "start" -> {conversation_id}
  * "chunk" -> {text}
  * "done"  -> {conversation_id, message_id, full_script, sections, retrieved_context, sql_valid, sql_issues}
- * "error" -> {message}
+ * "error" -> {code, message, request_id}
+ * Lines starting with ":" are heartbeats sent while the model thinks; the
+ * parser below skips them because they carry no data.
  */
 export async function* streamGenerate({ prompt, conversationId, isRegenerate }) {
   const response = await fetch(`${API_BASE}/generate/stream`, {
@@ -46,8 +48,9 @@ export async function* streamGenerate({ prompt, conversationId, isRegenerate }) 
   });
 
   if (!response.ok || !response.body) {
-    const detail = await response.json().catch(() => ({}));
-    throw new Error(detail.detail || `Request failed with status ${response.status}`);
+    const body = await response.json().catch(() => ({}));
+    // The service returns {error: {code, message, request_id}}.
+    throw new Error(body.error?.message || `Request failed with status ${response.status}`);
   }
 
   const reader = response.body.getReader();

@@ -80,14 +80,16 @@ to re-run any time.
 ## Embed the RAG corpus
 
 ```bash
-cd "05 - RAG Project/backend"
-python3 -m app.rag.ingest
+.venv/bin/python -m app.rag.ingest
 ```
 
-Re-embeds both Chroma collections (`schema_chunks`, `pattern_templates`) from
+A CLI command only -- there is no HTTP ingest endpoint. It runs at image
+build time and as a manual job. Re-embeds both Chroma collections (`schema_chunks`, `pattern_templates`) from
 `db/metadata.json` + `db/reference.db` and `app/sp_templates/`. Re-run this
 after editing the schema metadata, the reference schema, or any pattern
-snippet.
+snippet. Collections are updated in place, so repeated runs do not leave
+orphaned segment directories behind. Changing the embedding model changes the
+vector dimension: delete `data/vector_store/` before re-ingesting.
 
 ## Run the API
 
@@ -111,7 +113,8 @@ Raw OpenAPI schema: http://127.0.0.1:8000/api/openapi.json
 | GET    | `/conversations/{id}`      | Full message history for one conversation (404 if missing)                 |
 | DELETE | `/conversations/{id}`      | Delete a conversation and its messages (404 if missing)                     |
 | GET    | `/schema`                  | Reference schema tables/columns                                             |
-| POST   | `/ingest`                  | Re-embeds the schema + pattern corpus into Chroma                            |
+| GET    | `/health`                  | Liveness: the process is up. No dependencies                                 |
+| GET    | `/ready`                   | Readiness: config present, reference DB and both collections loaded (503 if not) |
 | GET    | `/metrics`                 | Aggregate telemetry: acceptance rate, latency per stage, output validity      |
 
 A `conversation_id` of `null` starts a new conversation; the response/stream
@@ -203,10 +206,71 @@ Gemini call (this is the long step; Gemini's reasoning time before the first
 token can be 30-60s), `validating_script` right before the final structural
 check.
 
-or `event: error` with `data: {"message": "..."}` in place of `done` if
-generation fails partway through.
+or `event: error` with `data: {"code": "...", "message": "...", "request_id": "..."}`
+in place of `done` if generation fails partway through. `code` is one of the
+stable error codes below; the raw upstream error never reaches the client.
 
-## Validation
+While the model is thinking the stream sends an SSE comment line,
+`: keepalive`, every `SSE_HEARTBEAT_S` (default 15s), so a load balancer
+never sees the connection idle long enough to drop it. SSE clients ignore
+comment lines.
+
+## Hardening
+
+Authentication is out of scope by design: in a real deployment the service
+sits behind an ALB or API gateway that authenticates callers first. What the
+service itself does:
+
+**Request validation.** `prompt` is required, non-blank and at most
+`MAX_PROMPT_CHARS` (default 8000) characters; unknown fields are rejected;
+`conversation_id` is length- and charset-bounded. Bodies over
+`MAX_REQUEST_BYTES` (default 64 KB) get a 413 before they are parsed. A
+validation failure reports which field and why -- not the input itself.
+
+**Typed errors.** Every error body is
+`{"error": {"code", "message", "request_id", "details"?}}`, with no stack
+trace or upstream payload. Codes are stable; messages may change.
+
+| Code | Status | When |
+|---|---|---|
+| `invalid_request` | 422 | body failed validation |
+| `bad_request` | 400 | well-formed but unusable (e.g. nothing to regenerate) |
+| `not_found` | 404 | unknown route or conversation |
+| `request_too_large` | 413 | body over `MAX_REQUEST_BYTES` |
+| `rate_limited` | 429 | in-process limiter refused it (`Retry-After` set) |
+| `not_configured` | 503 | `GEMINI_API_KEY` missing |
+| `index_unavailable` | 503 | vector store not loaded |
+| `upstream_rate_limited` | 503 | Gemini returned 429 |
+| `upstream_timeout` | 503 | Gemini did not answer in time |
+| `upstream_unavailable` | 503 | any other Gemini or transport failure |
+| `internal_error` | 500 | anything else (logged with traceback server-side) |
+
+**Timeouts and retries** (`app/rag/llm.py`). All Gemini clients -- the
+classifier, generation and embeddings -- are built in one place. The
+classifier (20s) and embeddings (20s) use the client library's own retry, 3
+attempts. Generation (300s, above the observed 232s worst case) does not:
+that retry also fires after a timeout, which would turn one 300s timeout
+into several. Generation retries once, and only a 429/500/502/503 that
+arrived within 30s of the attempt starting; a stream is retried only before
+any text has been sent. All of these are environment variables (see
+`app/config.py`).
+
+**Rate limiting** (`app/ratelimit.py`). An in-process token bucket on the
+two generation endpoints, per client IP: 6/minute, burst 3 by default. It is
+a fallback -- each task keeps its own buckets, so N tasks allow N times the
+rate. The real per-client limit belongs in front of the service (AWS WAF
+rate-based rules on the ALB, or API gateway usage plans). Behind an ALB set
+`TRUST_FORWARDED_FOR=true` so the client is taken from `X-Forwarded-For`.
+
+**Concurrency and shutdown.** Model calls are blocking, so they run off the
+event loop: `/generate` on FastAPI's threadpool, `/generate/stream` on a
+worker thread that also stops early if the client disconnects. `/health`
+stays responsive during generations. On SIGTERM uvicorn waits up to
+`GRACEFUL_SHUTDOWN_S` (110s) for in-flight requests; the ECS task's
+`stopTimeout` must be above that, and a generation longer than ECS allows
+(120s max) is still cut off by a deploy.
+
+## Generated-script validation
 
 Every generation is one deployable script. The seven `-- SECTION:` markers
 are SQL comments, so they sit inside a single procedure body:
@@ -235,25 +299,27 @@ golden eval prompts). `tests/test_pattern_templates.py` checks that they
 assemble into a valid script. They are retrieved into every prompt as house
 style, so a template that breaks the contract teaches the model to break it.
 
-## Telemetry & metrics
+## Logging & metrics
 
-Every `/generate` and `/generate/stream` call logs one row to
-`telemetry_events` in `data/app.db` (`app/db/telemetry_store.py`) --
-whether it was accepted or rejected, latency broken down per pipeline stage
-(classification / retrieval / generation), which tables got retrieved, and
-whether the output passed the structural validator. `GET /metrics` returns
-the aggregate: acceptance/rejection rate, average latency per stage,
-`sql_valid` rate, and the most-frequently-retrieved tables.
+Logs are one JSON object per line on stdout (`app/observability.py`), each
+carrying the request's `request_id` -- the caller's `X-Request-ID` if
+supplied, otherwise generated, and echoed back as a response header. Each
+generation logs its classification (accept/reject, latency), retrieval
+(tables and similarity scores, latency) and generation (latency, validator
+result). Prompts are never logged at INFO: only their length and a short
+hash.
 
-This is intentionally basic -- no tracing, no percentiles, no alerting, no
-external tool (no OpenTelemetry/Prometheus/Datadog). It answers "is this
-working, and roughly how well" from inside the codebase, which is enough to
-know the fundamentals of what production monitoring for a RAG system needs
-to capture, without pulling in infrastructure this project doesn't need yet.
+Metrics are CloudWatch Embedded Metric Format lines, not a `/metrics` scrape
+endpoint: each generation emits one log line with an `_aws` block, which
+CloudWatch turns into metrics with no agent or extra port. Namespace
+`SPGenerator`, dimensions `Endpoint` x `Outcome` (accepted / rejected /
+error), metrics `Requests`, `TotalLatency`, `ClassifyLatency`,
+`RetrievalLatency`, `GenerationLatency`, `SqlValid`, `RetrievedTables`.
+Off AWS they are ordinary log lines.
 
-```bash
-curl http://127.0.0.1:8000/metrics
-```
+The older SQLite telemetry store (`telemetry_events` in `data/app.db`, read
+by `GET /metrics`) still records the same events; it goes when the service
+becomes stateless.
 
 ## Testing & evals
 

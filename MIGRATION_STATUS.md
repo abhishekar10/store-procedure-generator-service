@@ -6,7 +6,7 @@ built and verified, the measurements that constrain the remaining work, and what
 next. Everything here was verified by running it — nothing is aspirational. Where a
 claim is a measurement, the number is given.
 
-Last updated after Phase 1c. Repo: `github.com/abhishekar10/store-procedure-generator-service`
+Last updated after Phase 2. Repo: `github.com/abhishekar10/store-procedure-generator-service`
 
 ---
 
@@ -62,7 +62,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 ```bash
 cd backend
 
-.venv/bin/python -m pytest -q          # 35 offline tests, ~0.05s, no API key needed
+.venv/bin/python -m pytest -q          # 69 offline tests, ~1.3s, no API key needed
 .venv/bin/python -m pytest evals/ -q   # 23 live-API evals, ~3m40s, costs real tokens
 .venv/bin/ruff check .                 # lint
 .venv/bin/ruff check . --fix
@@ -243,6 +243,71 @@ reference schema ported from SQLite; not part of the repo or CI yet):
 `MAIN_SCRIPT` is no longer the largest section — by design, it now holds only the
 mutation. The local `data/vector_store/` has been re-ingested.
 
+### Phase 2 — microservice hardening (complete)
+
+Measured before building, because the libraries did not behave as assumed:
+
+- `ChatGoogleGenerativeAI` defaults to **`max_retries=6` and no timeout**. A hung
+  generation could hang forever. Its `max_retries` is an attempt count, and its retry
+  fires on timeouts too: `timeout=2, max_retries=3` against a never-answering server took
+  10.2s over 3 connections.
+- `GoogleGenerativeAIEmbeddings` had **no working timeout at all**: `request_options` is
+  declared but never read, and a `client_args` timeout is overridden per request. It hung
+  indefinitely. Fixed by swapping in a google-genai `Client` with `HttpOptions(timeout,
+  retry_options)`; verified it times out and retries as set.
+- langchain-google-genai re-raises Gemini 4xx (429 included) as
+  `ChatGoogleGenerativeAIError` with the original as `__cause__`, but lets 5xx through
+  raw. Error mapping walks the cause chain.
+
+What was built:
+
+- **`app/rag/llm.py`** builds every Gemini client (classifier, generation, embeddings
+  for both retrieval and ingest). Classifier/embeddings: 20s timeout, library retry, 3
+  attempts. Generation: 300s timeout, library retry off, own retry — once, only on
+  429/500/502/503, only if the attempt failed within 30s; streams only before any text
+  was sent; plus an overall stream deadline. **Deviation from the plan:** langchain's
+  `.with_retry()` filters by exception *type* only, so it cannot tell a 429 from a 400
+  (same wrapper class) or a fast failure from a slow one. A 20-line loop does instead.
+  No new dependency.
+- **`app/errors.py`**: `ServiceError(status, code, message)` and one
+  `to_service_error()` used by both the HTTP handlers and the SSE `error` event. Body
+  `{"error": {code, message, request_id, details?}}`. Codes are listed in the module and
+  the backend README. The 422 handler no longer echoes the input back.
+- **Validation**: non-blank prompt ≤ `MAX_PROMPT_CHARS` (8000), `extra="forbid"`,
+  bounded `conversation_id`, body ≤ `MAX_REQUEST_BYTES` (64 KB) → 413 before parsing.
+  `StreamRequest` allows an empty prompt only with `is_regenerate` (the UI sends `""`).
+- **`app/ratelimit.py`**: token bucket per client IP on the two generation endpoints,
+  6/min burst 3, `Retry-After` on 429. `TRUST_FORWARDED_FOR` takes the *last*
+  `X-Forwarded-For` entry (the one the ALB appends).
+- **`app/middleware.py`** (pure ASGI): request ID (caller's `X-Request-ID` if sane, else
+  generated; echoed back), body cap, one access line per request (healthy probes at
+  DEBUG), last-resort JSON 500.
+- **`app/observability.py`**: JSON logs with `request_id` via contextvar; prompts logged
+  as length + 12-char hash only; the classifier's `reason` kept only for rejections (it
+  paraphrases the request). One **EMF** line per generation: namespace `SPGenerator`,
+  dimensions `Endpoint` x `Outcome`.
+- **SSE heartbeat**: the stream runs on a daemon worker thread and sends `: keepalive`
+  every 15s while the model thinks, and stops early on client disconnect. **This removes
+  the streaming path's dependence on the ALB idle timeout.**
+- **`/ingest` removed from HTTP.** `_sync_collection` upserts in place: repeated ingests
+  stay at 2 segment dirs (`chroma.sqlite3` still grows ~0.25 MB per run from Chroma's
+  internal log — minor).
+- **Shutdown**: `--timeout-graceful-shutdown ${GRACEFUL_SHUTDOWN_S:-110}`,
+  `--no-access-log`, compose `stop_grace_period: 2m`.
+- Frontend `api.js` reads `error.message` from the new body shape.
+
+Verified:
+
+- 23/23 live evals (4m56s) through the new client factories. 69/69 offline tests (34 new across `test_api_hardening.py`, `test_observability.py`),
+  ruff clean. Mutation-checked: allowing retries on 400/504, removing the heartbeat, and
+  retrying after text was sent each turn a test red.
+- Live, locally: a real stream sent 4 heartbeats and 65 chunks, returned
+  `sql_valid: true`; `/health` answered in ~1ms three times during the generation; every
+  log line JSON with the request ID; prompt text found 0 times in the log.
+- Container: rebuilt; SIGTERM sent 10s into a live generation — uvicorn waited ~20s for
+  it, the client got `done`, then the app shut down. CORS and `x-request-id` headers on
+  the stream response.
+
 ### Verified end to end (Phase 1)
 
 - 20/20 offline tests pass with `GEMINI_API_KEY` unset.
@@ -257,7 +322,7 @@ mutation. The local `data/vector_store/` has been re-ingested.
 
 ## 4. Measurements that constrain the remaining work
 
-### 4.1 Generation takes 133–177 seconds
+### 4.1 Generation takes 44–232 seconds
 
 Measured repeatedly. Telemetry from live runs: `avg_generation_latency_ms = 171,722`;
 classifier ~4.7s, retrieval ~0.6s, generation ~172s.
@@ -291,7 +356,7 @@ The UI never renders `sections` (it shows `full_script` via `CodeBlock`), so thi
 invisible in the demo — but it is wrong in the API contract, and the seven-section
 structure is the project's central claim.
 
-### 4.3 There are TWO LLM construction sites
+### 4.3 There are TWO LLM construction sites (consolidated in Phase 2 — `app/rag/llm.py`)
 
 - `generator.py` `_build_llm()` — used by generation and streaming.
 - `generator.py` `classify_request()` — **inlines its own `ChatGoogleGenerativeAI`** at
@@ -300,7 +365,7 @@ structure is the project's central claim.
 Timeouts, retries and test mocks must cover **both**. Patching `_build_llm` alone still
 lets the classifier make a live call.
 
-### 4.4 Ingest leaves orphaned Chroma segments
+### 4.4 Ingest leaves orphaned Chroma segments (fixed in Phase 2)
 
 `_replace_collection()` hard-deletes and recreates both collections every run, minting
 new segment UUIDs. Chroma does not reclaim the old directories. The old local store had
@@ -346,28 +411,6 @@ afterwards. Never leave anything running that costs money without saying so.
 ---
 
 ## 6. What to do next
-
-### Phase 2 — hardening
-
-- **Validation**: prompt `min_length=1`, `max_length` ~8000, bounded `messages` list.
-  Today an empty prompt and a 200,000-char prompt both sail through to generation.
-- **Timeouts and retries on both LLM sites** (see 4.3). Consolidate `classify_request`
-  onto a shared factory first. Reuse langchain's built-in `.with_retry()` and the
-  client timeout rather than adding `tenacity`. Retry transient 429/5xx only.
-  Generation timeout must exceed 180s.
-- **Typed errors**: upstream failure returns 503 with a stable error code. Today
-  `/generate` returns a bare 500 with a full traceback in the log, and
-  `/generate/stream` emits the raw Google error JSON straight to the browser. Both leak.
-- **Rate limiting**: small in-process token bucket, no new dependency. Document that the
-  real limit belongs at ALB/WAF.
-- **`/ingest` leaves HTTP** — becomes `python -m app.rag.ingest` only. Fix
-  `_replace_collection` to clean orphaned segments while you are in there.
-- **Structured JSON logging** via stdlib `logging` plus a `contextvar` request-ID
-  middleware. Log latency, retrieved tables and scores, accept/reject, validator result.
-  Do not log full prompts at INFO.
-- **Metrics as CloudWatch EMF log lines.** The 15 keyword arguments of the existing
-  `telemetry_store.log_event` are exactly the field list to emit.
-- **Graceful shutdown**, and get the sync LLM calls off the event loop properly.
 
 ### Phase 3 — stateless and pluggable
 
@@ -417,7 +460,9 @@ afterwards. Never leave anything running that costs money without saying so.
   with the stores. `conftest.py`'s `isolated_app_db` fixture then has no users —
   replace it with LLM/embedding fakes.
 - **API tests** with `TestClient` and **both** LLM sites mocked: happy path, classifier
-  rejection, validation errors, upstream 503, SSE event shape. The mocking pattern that
+  rejection, validation errors, upstream 503, SSE event shape. **Largely done in Phase 2**
+  (`tests/test_api_hardening.py`, 25 tests, using the `isolated_app_db` fixture); Phase 3
+  must port them to the `/v1` stateless endpoints and drop the store fixture. The mocking pattern that
   works is patching the module-level factory functions
   (`app.rag.generator._build_llm`, `app.rag.retriever._get_embeddings`), because
   everything resolves `config.`-style settings at call time, not import time.
@@ -435,6 +480,13 @@ S3 + CloudFront for the UI. Public subnets plus security groups, **no NAT gatewa
 (cost). Local state, stated as such in the README.
 
 **`idle_timeout = 300` on the ALB is the single most important setting here.** See 4.1.
+Since Phase 2 the streaming path sends a heartbeat every 15s, so it no longer depends on
+the idle timeout. Non-streaming `/generate` still does: its worst case is classifier
+(~65s with retries) + retrieval + generation (300s timeout), which can exceed 300s. Either
+raise `idle_timeout` to ~420s or accept that `/generate` can be cut — **owner's call;
+flagged, not changed.** Also set the ECS task `stopTimeout = 120` (above
+`GRACEFUL_SHUTDOWN_S = 110`) and ALB `deregistration_delay` to ~120s, or deploys will cut
+in-flight generations sooner than they need to.
 
 Variables: region, image tag, desired count. Outputs: ALB URL, CloudFront URL.
 Cost guard: `make up` / `make down`.

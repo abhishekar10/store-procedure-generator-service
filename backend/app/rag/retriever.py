@@ -10,6 +10,7 @@ import chromadb
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from app.config import PATTERN_CATEGORIES, get_settings
+from app.rag.llm import build_embeddings
 
 
 @dataclass
@@ -37,11 +38,7 @@ def _get_client() -> chromadb.ClientAPI:
 
 
 def _get_embeddings() -> GoogleGenerativeAIEmbeddings:
-    settings = get_settings()
-    return GoogleGenerativeAIEmbeddings(
-        model=settings.embedding_model,
-        google_api_key=settings.require_gemini_api_key(),
-    )
+    return build_embeddings()
 
 
 def retrieve_schema_chunks(prompt: str, top_k: int | None = None) -> list[RetrievedChunk]:
