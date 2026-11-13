@@ -435,7 +435,21 @@ unknown fields refused, so the old `{prompt, conversation_id}` shape gets a 422.
 `start` event is gone (it only carried `conversation_id`); `rejected` and `done` no longer
 carry ids. `MAX_REQUEST_BYTES` raised 64 KB → 256 KB because the caller now resends every
 earlier script (~8 KB each): about 25 turns. API tests ported to `/v1` (42 in
-`test_api_hardening.py`). **The frontend still calls the old routes until step 2.**
+`test_api_hardening.py`).
+
+**Step 2 done — frontend on `/v1`, history in localStorage.** `src/conversationStore.js`
+keeps conversations under `sp-generator.conversations.v1`, every storage access guarded
+(theme's too), oldest conversations dropped if the quota is hit; `toApiMessages` reduces
+saved messages to the request shape. A reply is saved only once `done`/`rejected`, so a
+failed one is never sent back as history. Regenerate resends without the last answer and
+keeps the old one until the new one lands. `RetrievedContextPanel` no longer dereferences
+`chunk.metadata` blindly. `sections` is not kept client-side (the markers are in the
+script); the API still returns it. Verified: oxlint clean, Vite build, a Node check of the
+store (quota trimming, broken storage, malformed data, request shape), and the UI's request
+flow against the rebuilt containers. **Not clicked through in a browser.** Conversations
+from the old server-side `app.db` are not migrated.
+
+Remaining in this phase: adapters (step 3), OpenAPI spec + `docs/ARCHITECTURE.md` (step 4).
 
 Original plan for this phase:
 
@@ -532,11 +546,11 @@ Pass it with `--secret id=gemini_key,env=GEMINI_API_KEY`, never as a build ARG.
 
 ## 7. Known issues not yet addressed
 
-- **`README.md` files are stale.** `backend/README.md` and `frontend/README.md` still
-  describe the old monorepo layout: a shared `rag/.venv`, `pip install -r
+- **`README.md` files are partly stale.** Their API and history sections are current
+  (Phase 3), but `backend/README.md` and `frontend/README.md` still describe the old
+  monorepo layout: a shared `rag/.venv`, `pip install -r
   requirements.txt`, `cd "05 - RAG Project/backend"`, and a `GEMINI_API_KEY` read from
-  `rag/.env`. `backend/README.md` also documents `/conversations` and `/metrics`, which
-  Phase 3 removes. The root has no README at all yet.
+  `rag/.env` in their setup sections. The root has no README at all yet.
 - `backend/evals/test_retrieval_eval.py` and `backend/README.md` cite
   `06 - Interview Questions/00-review-findings.md`, which did not travel with the
   extraction. Rewrite those citations to stand alone.

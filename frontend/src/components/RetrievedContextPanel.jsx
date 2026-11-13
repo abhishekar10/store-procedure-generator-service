@@ -2,8 +2,10 @@ import { useState } from "react";
 
 export default function RetrievedContextPanel({ retrievedContext }) {
   const [expanded, setExpanded] = useState(false);
-  const schemaChunks = retrievedContext?.schema_chunks ?? [];
-  const patternChunks = retrievedContext?.pattern_chunks ?? [];
+  // Saved history comes back from localStorage, so tolerate malformed chunks.
+  const isChunk = (chunk) => chunk && typeof chunk === "object";
+  const schemaChunks = (retrievedContext?.schema_chunks ?? []).filter(isChunk);
+  const patternChunks = (retrievedContext?.pattern_chunks ?? []).filter(isChunk);
 
   if (schemaChunks.length === 0 && patternChunks.length === 0) return null;
 
@@ -17,12 +19,12 @@ export default function RetrievedContextPanel({ retrievedContext }) {
       <div className="context-pills">
         {schemaChunks.map((chunk) => (
           <span key={chunk.id} className="pill pill-schema">
-            {chunk.metadata.table_name}
+            {chunk.metadata?.table_name ?? chunk.id}
           </span>
         ))}
         {patternChunks.map((chunk) => (
           <span key={chunk.id} className="pill pill-pattern">
-            {chunk.metadata.category}
+            {chunk.metadata?.category ?? chunk.id}
           </span>
         ))}
       </div>
@@ -31,13 +33,13 @@ export default function RetrievedContextPanel({ retrievedContext }) {
         <div className="context-details">
           {schemaChunks.map((chunk) => (
             <details key={chunk.id} className="context-detail-item">
-              <summary>{chunk.metadata.table_name}</summary>
+              <summary>{chunk.metadata?.table_name ?? chunk.id}</summary>
               <pre>{chunk.text}</pre>
             </details>
           ))}
           {patternChunks.map((chunk) => (
             <details key={chunk.id} className="context-detail-item">
-              <summary>{chunk.metadata.category}</summary>
+              <summary>{chunk.metadata?.category ?? chunk.id}</summary>
               <pre>{chunk.text}</pre>
             </details>
           ))}

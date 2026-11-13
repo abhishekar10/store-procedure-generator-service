@@ -2,115 +2,109 @@ import { useEffect, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import ChatWindow from "./components/ChatWindow";
 import ChatInput from "./components/ChatInput";
-import { listConversations, getConversation, deleteConversation, streamGenerate } from "./api";
+import { streamGenerate } from "./api";
+import { loadConversations, newConversation, saveConversations, toApiMessages } from "./conversationStore";
 
 function loadInitialTheme() {
-  const saved = localStorage.getItem("theme");
-  if (saved === "light" || saved === "dark") return saved;
+  try {
+    const saved = localStorage.getItem("theme");
+    if (saved === "light" || saved === "dark") return saved;
+  } catch {
+    // storage unavailable (private window, blocked site data): use the OS preference
+  }
   return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
+// Saved messages carry no UI status; MessageBubble wants one.
+const withStatus = (m) => (m.role === "assistant" ? { ...m, status: m.kind === "rejected" ? "rejected" : "done" } : m);
+
 export default function App() {
   const [theme, setTheme] = useState(loadInitialTheme);
-  const [conversations, setConversations] = useState([]);
+  const [conversations, setConversations] = useState(loadConversations);
   const [activeConversationId, setActiveConversationId] = useState(null);
-  const [messages, setMessages] = useState([]);
+  // The reply being generated: {conversationId, replacesLast, message}. It
+  // joins its conversation only once it is done or rejected, so a failed or
+  // half-streamed reply is never saved or sent back to the service.
+  const [pending, setPending] = useState(null);
   const [isStreamActive, setIsStreamActive] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem("theme", theme);
+    try {
+      localStorage.setItem("theme", theme);
+    } catch {
+      // not saved; the choice still applies for this session
+    }
   }, [theme]);
 
   useEffect(() => {
-    refreshConversations();
-  }, []);
+    saveConversations(conversations);
+  }, [conversations]);
 
-  const refreshConversations = async () => {
-    try {
-      setConversations(await listConversations());
-    } catch {
-      // backend not reachable yet -- sidebar just stays empty
-    }
-  };
+  const activeConversation = conversations.find((c) => c.id === activeConversationId);
+  const savedMessages = activeConversation?.messages ?? [];
+  const pendingHere = pending && pending.conversationId === activeConversationId ? pending : null;
+  // A regeneration hides the answer it replaces -- unless it failed, in which
+  // case the old answer is still the latest good one.
+  const hidesLast = pendingHere?.replacesLast && pendingHere.message.status !== "error";
+  const messages = [
+    ...(hidesLast ? savedMessages.slice(0, -1) : savedMessages).map(withStatus),
+    ...(pendingHere ? [pendingHere.message] : []),
+  ];
 
-  const handleNewChat = () => {
-    setActiveConversationId(null);
-    setMessages([]);
-    setIsSidebarOpen(false);
-  };
+  const updateConversation = (conversationId, update) =>
+    setConversations((prev) => prev.map((c) => (c.id === conversationId ? update(c) : c)));
 
-  const handleSelectConversation = async (conversationId) => {
-    const conversation = await getConversation(conversationId);
-    setActiveConversationId(conversation.id);
-    setMessages(
-      conversation.messages.map((m) =>
-        m.role === "assistant" ? { ...m, status: m.kind === "rejected" ? "rejected" : "done" } : m
-      )
-    );
-    setIsSidebarOpen(false);
-  };
+  const updatePendingMessage = (update) =>
+    setPending((p) => (p ? { ...p, message: { ...p.message, ...update(p.message) } } : p));
 
-  const handleDeleteConversation = async (conversation) => {
-    if (!window.confirm(`Delete "${conversation.title}"? This can't be undone.`)) return;
-
-    await deleteConversation(conversation.id);
-    setConversations((prev) => prev.filter((c) => c.id !== conversation.id));
-
-    if (conversation.id === activeConversationId) {
-      setActiveConversationId(null);
-      setMessages([]);
-    }
-  };
-
-  const runStream = async (assistantMessageId, streamArgs) => {
+  const runStream = async (conversationId, history, replacesLast) => {
+    setPending({
+      conversationId,
+      replacesLast,
+      message: { id: crypto.randomUUID(), role: "assistant", status: "thinking", stage: "processing", full_script: "" },
+    });
     setIsStreamActive(true);
+    let settled = false;
+
+    const fail = (errorMessage) => {
+      settled = true;
+      updatePendingMessage(() => ({ status: "error", errorMessage }));
+    };
+
     try {
-      for await (const { event, data } of streamGenerate(streamArgs)) {
-        if (event === "start") {
-          setActiveConversationId((current) => current ?? data.conversation_id);
-          refreshConversations();
-        } else if (event === "status") {
-          setMessages((prev) => prev.map((m) => (m.id === assistantMessageId ? { ...m, stage: data.stage } : m)));
+      for await (const { event, data } of streamGenerate(toApiMessages(history))) {
+        if (event === "status") {
+          updatePendingMessage(() => ({ stage: data.stage }));
         } else if (event === "chunk") {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMessageId ? { ...m, status: "streaming", full_script: m.full_script + data.text } : m
-            )
-          );
-        } else if (event === "done") {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMessageId
-                ? {
-                    ...m,
-                    status: "done",
-                    full_script: data.full_script,
-                    sections: data.sections,
-                    retrieved_context: data.retrieved_context,
-                    sql_valid: data.sql_valid,
-                    sql_issues: data.sql_issues,
-                  }
-                : m
-            )
-          );
-          refreshConversations();
-        } else if (event === "rejected") {
-          setMessages((prev) =>
-            prev.map((m) => (m.id === assistantMessageId ? { ...m, status: "rejected", content: data.reason } : m))
-          );
-          refreshConversations();
+          updatePendingMessage((m) => ({ status: "streaming", full_script: m.full_script + data.text }));
+        } else if (event === "done" || event === "rejected") {
+          settled = true;
+          const reply =
+            event === "done"
+              ? {
+                  id: crypto.randomUUID(),
+                  role: "assistant",
+                  kind: "generation",
+                  full_script: data.full_script,
+                  retrieved_context: data.retrieved_context,
+                  sql_valid: data.sql_valid,
+                  sql_issues: data.sql_issues,
+                }
+              : { id: crypto.randomUUID(), role: "assistant", kind: "rejected", content: data.reason };
+          updateConversation(conversationId, (c) => ({
+            ...c,
+            messages: [...(replacesLast ? c.messages.slice(0, -1) : c.messages), reply],
+          }));
+          setPending(null);
         } else if (event === "error") {
-          setMessages((prev) =>
-            prev.map((m) => (m.id === assistantMessageId ? { ...m, status: "error", errorMessage: data.message } : m))
-          );
+          fail(data.message);
         }
       }
+      if (!settled) fail("The connection closed before the script was finished.");
     } catch (err) {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === assistantMessageId ? { ...m, status: "error", errorMessage: err.message } : m))
-      );
+      fail(err.message);
     } finally {
       setIsStreamActive(false);
     }
@@ -118,32 +112,43 @@ export default function App() {
 
   const handleSend = (promptText) => {
     const userMessage = { id: crypto.randomUUID(), role: "user", content: promptText };
-    const assistantMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      full_script: "",
-      status: "thinking",
-      stage: "processing",
-    };
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
-    runStream(assistantMessage.id, { prompt: promptText, conversationId: activeConversationId });
+
+    if (!activeConversation) {
+      const conversation = { ...newConversation(promptText), messages: [userMessage] };
+      setConversations((prev) => [conversation, ...prev]);
+      setActiveConversationId(conversation.id);
+      runStream(conversation.id, conversation.messages, false);
+      return;
+    }
+
+    updateConversation(activeConversation.id, (c) => ({ ...c, messages: [...c.messages, userMessage] }));
+    runStream(activeConversation.id, [...savedMessages, userMessage], false);
   };
 
+  // Regenerating is resending the conversation without its last answer.
   const handleRegenerate = () => {
-    if (!activeConversationId) return;
-    const assistantMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      full_script: "",
-      status: "thinking",
-      stage: "processing",
-    };
-    setMessages((prev) => [...prev, assistantMessage]);
-    runStream(assistantMessage.id, { prompt: "", conversationId: activeConversationId, isRegenerate: true });
+    if (!activeConversation || isStreamActive || savedMessages.at(-1)?.role !== "assistant") return;
+    runStream(activeConversation.id, savedMessages.slice(0, -1), true);
   };
 
-  const activeConversation = conversations.find((c) => c.id === activeConversationId);
-  const conversationTitle = activeConversation?.title || messages.find((m) => m.role === "user")?.content || "stored_procedure";
+  const handleNewChat = () => {
+    setActiveConversationId(null);
+    setIsSidebarOpen(false);
+  };
+
+  const handleSelectConversation = (conversationId) => {
+    setActiveConversationId(conversationId);
+    setIsSidebarOpen(false);
+  };
+
+  const handleDeleteConversation = (conversation) => {
+    if (!window.confirm(`Delete "${conversation.title}"? This can't be undone.`)) return;
+
+    setConversations((prev) => prev.filter((c) => c.id !== conversation.id));
+    if (conversation.id === activeConversationId) setActiveConversationId(null);
+  };
+
+  const conversationTitle = activeConversation?.title || "stored_procedure";
 
   return (
     <div className="app">

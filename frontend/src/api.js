@@ -1,22 +1,5 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
-export async function listConversations() {
-  const response = await fetch(`${API_BASE}/conversations`);
-  const data = await response.json();
-  return data.conversations;
-}
-
-export async function getConversation(conversationId) {
-  const response = await fetch(`${API_BASE}/conversations/${conversationId}`);
-  if (!response.ok) throw new Error("Conversation not found");
-  return response.json();
-}
-
-export async function deleteConversation(conversationId) {
-  const response = await fetch(`${API_BASE}/conversations/${conversationId}`, { method: "DELETE" });
-  if (!response.ok) throw new Error("Failed to delete conversation");
-}
-
 function parseSSEBlock(block) {
   let eventName = "message";
   const dataLines = [];
@@ -29,22 +12,20 @@ function parseSSEBlock(block) {
 }
 
 /** Streams a generation over SSE, yielding {event, data} objects:
- * "start" -> {conversation_id}
- * "chunk" -> {text}
- * "done"  -> {conversation_id, message_id, full_script, sections, retrieved_context, sql_valid, sql_issues}
- * "error" -> {code, message, request_id}
- * Lines starting with ":" are heartbeats sent while the model thinks; the
- * parser below skips them because they carry no data.
+ * "status"   -> {stage}
+ * "chunk"    -> {text}
+ * "done"     -> {full_script, sections, retrieved_context, sql_valid, sql_issues}
+ * "rejected" -> {reason}
+ * "error"    -> {code, message, request_id}
+ * `messages` is the conversation so far, ending with the new request (see
+ * conversationStore.toApiMessages). Lines starting with ":" are heartbeats
+ * sent while the model thinks; the parser skips them because they carry no data.
  */
-export async function* streamGenerate({ prompt, conversationId, isRegenerate }) {
-  const response = await fetch(`${API_BASE}/generate/stream`, {
+export async function* streamGenerate(messages) {
+  const response = await fetch(`${API_BASE}/v1/generate/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt,
-      conversation_id: conversationId ?? null,
-      is_regenerate: Boolean(isRegenerate),
-    }),
+    body: JSON.stringify({ messages }),
   });
 
   if (!response.ok || !response.body) {

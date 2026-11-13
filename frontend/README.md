@@ -1,15 +1,17 @@
 # Frontend
 
 React + Vite chat UI for the stored procedure generator. Talks to the
-backend's `/generate/stream` (SSE) and `/conversations` endpoints -- see
-`../backend/README.md` for the API.
+backend's `/v1/generate/stream` (SSE) -- see `../backend/README.md` for the
+API. The service is stateless, so conversation history lives here, in the
+browser's localStorage.
 
 ## Layout
 
 ```
 frontend/
   src/
-    api.js                       backend client: listConversations, getConversation, deleteConversation, streamGenerate
+    api.js                       backend client: streamGenerate
+    conversationStore.js         conversation history in localStorage + the request-body shape
     utils.js                     download-as-.sql, slugify, relative time formatting
     starterPrompts.js            the 4 candidate prompts shown on an empty chat
     thinkingStages.js            backend status-stage labels + drafting sub-phrases
@@ -41,38 +43,45 @@ var (e.g. in a `.env.local`) if it's running elsewhere.
 
 ## How the chat maps to the backend
 
-- Sending a message with no active conversation calls `/generate/stream`
-  with `conversation_id: null`; the `start` SSE event returns the new id,
-  which is then reused for every later message in that thread.
-- Follow-up messages are just another `/generate/stream` call with the same
-  `conversation_id` -- the backend threads in the full prior conversation, so
-  the result reads as a revision, not a fresh unrelated script.
-- **Regenerate** calls `/generate/stream` with `is_regenerate: true` and no
-  new prompt text -- the backend reuses the last user message and appends a
-  new assistant message rather than duplicating the user turn.
+- **History is the browser's.** Conversations are saved in localStorage
+  under `sp-generator.conversations.v1` (`src/conversationStore.js`). Every
+  storage access is guarded: in a private window, with blocked site data, or
+  when the quota is full the app keeps working and history simply isn't
+  saved. If the quota is exceeded, the oldest conversations are dropped until
+  the rest fit. Clearing site data clears the history.
+- **Every request carries the conversation.** Sending calls
+  `/v1/generate/stream` with `messages`: every earlier turn plus the new
+  request, reduced to what the service accepts (`toApiMessages`: user text,
+  earlier scripts, earlier rejection reasons). Follow-ups therefore read as
+  revisions of the previous script, not fresh unrelated ones.
+- A new conversation is created in the browser the moment the first message
+  is sent, titled from that message; it shows in the sidebar immediately.
+- A reply joins its conversation only when it is `done` or `rejected`. A
+  failed or half-streamed reply is shown as an error but never saved, so it
+  is never sent back to the service as history.
+- **Regenerate** resends the conversation without its last answer. The old
+  answer stays hidden while the new one streams and is replaced when it
+  finishes; if regeneration fails, the old answer is shown again.
 - The thinking indicator reflects the backend's real `status` SSE events
   (`checking_request` / `retrieving_context` / `drafting_script` /
   `validating_script`, see `src/thinkingStages.js`), not a generic spinner.
-  `drafting_script` is the long step -- Gemini's reasoning time before the
-  first token can be 30-60s -- so its sub-phrases cycle client-side to keep
-  the wait legible.
+  `drafting_script` is the long step -- typically 10-20s -- so its
+  sub-phrases cycle client-side to keep the wait legible.
 - **Off-topic requests are rejected before generation runs.** The backend
   gates every request through a small classification call; a rejection comes
-  back as a `rejected` SSE event (or `rejected: true` from `/generate`) and
-  renders as an info box explaining why, instead of a code block. Persisted
-  history messages carry `kind: "rejected"` to distinguish them from real
-  generations on reload.
-- The sidebar refreshes on the `start` event, not just `done` -- a new
-  conversation shows up as soon as the request is sent, before the response
-  finishes.
+  back as a `rejected` SSE event and renders as an info box explaining why,
+  instead of a code block. It is saved with `kind: "rejected"` and sent back
+  as such, so later turns know why nothing was generated.
 - Deleting a conversation (trash icon on hover) confirms via `window.confirm`
-  then calls `DELETE /conversations/{id}`; if the deleted thread was active,
-  the chat resets to the empty state.
+  and removes it from localStorage; if the deleted thread was active, the
+  chat resets to the empty state.
 - **Download** and **Copy** are pure client-side (`Blob` + temporary
   `<a download>`, `navigator.clipboard`) -- no backend round-trip.
 - The retrieved-context panel renders `retrieved_context.schema_chunks` /
   `.pattern_chunks` directly from the `done` event -- it's the same data the
-  backend used to ground that specific generation, not a separate lookup.
+  backend used to ground that specific generation, not a separate lookup. It
+  is saved with the message; `sections` is not, because the seven section
+  markers are already visible in the script itself.
 
 ## Responsive layout
 
