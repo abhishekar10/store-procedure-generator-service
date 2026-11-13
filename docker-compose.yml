@@ -1,0 +1,48 @@
+# Local run of the whole demo: the service plus its UI.
+#
+#   export GEMINI_API_KEY=...        (or put it in a .env file next to this one)
+#   docker compose up --build
+#
+#   UI   http://localhost:5173
+#   API  http://localhost:8000   (docs at /api/docs)
+#
+# GEMINI_API_KEY is the only thing you have to supply. It is needed twice: at
+# build time to embed the corpus into the backend image, and at run time for
+# generation.
+
+services:
+  api:
+    build:
+      context: ./backend
+      secrets:
+        - gemini_key
+    image: sp-generator-api:local
+    ports:
+      - "8000:8000"
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?set GEMINI_API_KEY in your environment or a .env file}
+      CORS_ALLOW_ORIGINS: http://localhost:5173
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=4).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  ui:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the bundle at build time. This is the URL the browser
+        # uses, so it is the host-published port, not the compose service name.
+        VITE_API_BASE_URL: http://localhost:8000
+    image: sp-generator-ui:local
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+secrets:
+  gemini_key:
+    environment: GEMINI_API_KEY

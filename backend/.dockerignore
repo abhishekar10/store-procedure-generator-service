@@ -1,0 +1,22 @@
+# Generated artifacts. The image builds its own reference DB and vector store
+# at build time, so copying a local one in would ship stale embeddings, 10 MB
+# of orphaned Chroma segments, and any local conversation history in app.db.
+data/
+db/reference.db
+
+# Local environments and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Secrets. The key is supplied as a BuildKit secret at build time and from
+# Secrets Manager at run time -- never baked into a layer.
+.env
+*.env
+
+# Not needed in the image
+tests/
+evals/
+README.md
