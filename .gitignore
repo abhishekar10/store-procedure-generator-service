@@ -4,3 +4,8 @@ backend/data/
 
 __pycache__/
 *.pyc
+
+# Secrets and local virtualenvs (these rules lived in the parent rag/.gitignore,
+# which did not travel with the subtree split).
+.env
+.venv/
