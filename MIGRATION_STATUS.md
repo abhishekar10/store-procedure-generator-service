@@ -630,9 +630,17 @@ Pass it with `--secret id=gemini_key,env=GEMINI_API_KEY`, never as a build ARG.
 - Retrieval precision is loose on some prompts — all 9 tables live in one domain, so
   embeddings cluster tightly. The eval thresholds (recall ≥ 0.5 per case, ≥ 0.6 mean)
   are regression canaries, **not** a claim that retrieval is good.
-- The classifier accepts on-topic-sounding requests for other databases or domains
-  (e.g. "a MySQL stored procedure for a library's book loans"); its prompt only
-  rejects requests unrelated to *any* database operation. Owner's call whether to tighten.
+- The classifier accepts requests for other databases: a live "Language: mysql" request
+  on the demo got PostgreSQL with no warning. **Fix planned in `docs/ROADMAP.md` v1.0.x**
+  (reject with "MySQL support is planned"); MySQL itself is v1.1.
+- Generated safety checks can miss a wrong request: the same live test asked for a
+  backwards formula, and the script set all ten seed payroll entries' deductions negative
+  (rollback restored them). Post-validation checked only its own staging table, not the
+  invariant. **Fix planned in `docs/ROADMAP.md` v1.0.x.**
+- **Roadmap (owner, 2026-11-15):** MySQL support (v1.1) and own-schema generation with a
+  visual schema editor (v1.2) — see `docs/ROADMAP.md`, including the design questions each
+  raises (MySQL's handler position vs the section order; where an edited schema lives in
+  a stateless service).
 - The demo UI has been verified by build, lint, a Node check of its storage module and
   its request flow against the containers, but **not clicked through in a browser**.
 - The Mermaid diagrams in `docs/ARCHITECTURE.md` have not been rendered by a tool.

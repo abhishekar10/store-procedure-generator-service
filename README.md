@@ -47,6 +47,7 @@ A generation takes about 15 seconds.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How it fits into a larger system: gateway and auth, caller-owned state, adapters, request flow |
 | [`docs/openapi.json`](docs/openapi.json) | The `/v1` contract, checked in and pinned by a test |
 | [`docs/sample-output/`](docs/sample-output/) | An example generation |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned: fixes from testing, MySQL support (v1.1), your own schema with a visual editor (v1.2) |
 | [`infra/`](infra/README.md) | Terraform for AWS and `make up` / `make down` (written, not yet applied) |
 | [`MIGRATION_STATUS.md`](MIGRATION_STATUS.md) | Working log: what is done, measurements, decisions, what is next |
 | `planning/` | Original design notes, partly superseded -- not the current spec |
@@ -87,5 +88,6 @@ Written and planned, **not yet applied**: Terraform for AWS in
 ALB at `https://sqlgen.abhishek.gen.in`, and a budget kill switch (applied
 and tested) -- driven by `make up` / `make down`, with a cost estimate.
 
-Planned, not built: CI/CD on GitHub Actions. See
-[`MIGRATION_STATUS.md`](MIGRATION_STATUS.md).
+Planned, not built: CI/CD on GitHub Actions; MySQL support; generating
+against your own schema with a visual schema editor. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) and [`MIGRATION_STATUS.md`](MIGRATION_STATUS.md).
