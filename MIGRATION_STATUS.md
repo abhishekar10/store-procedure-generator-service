@@ -606,8 +606,15 @@ fix (it used `DO $$` blocks), so it was replaced by a fresh, Postgres-checked sa
   There are no git credentials configured on this machine — no helper, no
   `~/.git-credentials`, no SSH keys — so the owner pushes from VS Code's source control
   panel, not the CLI.
-- **An AWS account exists (owner, 2026-11-14). The CLI is not configured** (`~/.aws`
-  does not exist). See "Before Phase 5" below for what is needed.
+- **AWS is set up for the CLI (2026-11-14).** Profile `sp-generator`: IAM Identity
+  Center (SSO session `personal`), role `AdministratorAccess`, region `ap-south-1`,
+  verified with `aws sts get-caller-identity`. When the session expires:
+  `aws sso login --profile sp-generator`. Root has MFA and no access keys.
+- **Budgets** (the only AWS resources created so far, both free): the console's "My
+  Zero-Spend Budget" ($0.01), and `monthly-1000-inr` — $11.50/month (≈ ₹1,000; the
+  Budgets API accepts only USD for this account), email alerts on *actual* spend at 50%,
+  75% and 95%, to the owner's address. Created by Claude at the owner's request.
+  Cost data lags by hours, so alerts are a backstop, not a real-time cutoff.
 - The compose stack may still be running (`docker compose ps`). `docker compose down`
   to stop it. A scratch Postgres container `sp-pg` may also be running
   (`docker rm -f sp-pg`).
@@ -616,20 +623,19 @@ fix (it used `DO $$` blocks), so it was replaced by a fresh, Postgres-checked sa
 
 ### Before Phase 5
 
-From the owner:
+Done: CLI credentials (SSO, not root), root MFA, the budget. Still open: **the HTTPS
+decision** (below). `terraform init/validate/plan` run freely; `terraform apply` waits
+for the owner's go-ahead in that session.
 
-1. **CLI credentials that are not the root user's.** Preferred: IAM Identity Center
-   with a user holding `AdministratorAccess` for this account, then
-   `aws configure sso` (profile name e.g. `sp-generator`, region `ap-south-1`). An IAM
-   user with access keys also works. Never root access keys. Keys are entered into the
-   CLI by the owner, never pasted into a chat or committed.
-2. **MFA on the root user**, and a **budget alert** (AWS Budgets, e.g. ₹1,000/month,
-   email at 50/80/100%) — the budget is small and this is the backstop.
-3. **The HTTPS decision** (below).
-
-Then, without creating anything: `aws sts get-caller-identity --profile sp-generator`
-confirms access; `terraform init/validate/plan` run freely. `terraform apply` waits for
-the owner's go-ahead in that session.
+**Kill switch — requested by the owner, to build in Phase 5.** AWS Budgets' own actions
+can only attach a deny policy or stop EC2/RDS instances; they cannot stop Fargate, an
+ALB or CloudFront. So: the budget's 95% alert also notifies an SNS topic → a small
+Lambda that sets the ECS service's desired count to 0 and deletes the ALB (the hourly
+costs), and emails that it fired. `make up` recreates both (Terraform sees them missing).
+Same lag caveat as the alerts. Rough running cost of the demo stack, from memory and
+**not checked against current ap-south-1 prices**: ~₹100–150/day (Fargate 0.5 vCPU /
+1 GB, ALB hours, public IPv4 addresses) — so ₹1,000 is about a week left running.
+Gemini usage is billed by Google, outside this budget.
 
 **HTTPS / mixed content — needs a decision.** The UI on CloudFront is HTTPS. An ALB
 without a domain serves only HTTP (an ACM certificate needs a domain), and browsers
