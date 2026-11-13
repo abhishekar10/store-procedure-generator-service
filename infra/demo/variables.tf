@@ -9,8 +9,14 @@ variable "name" {
   default     = "sp-generator"
 }
 
+variable "domain_name" {
+  description = "Where the demo is served. Its Route 53 zone and certificate come from the account stack."
+  type        = string
+  default     = "sqlgen.abhishek.gen.in"
+}
+
 variable "image_tag" {
-  description = "Tag of the API image in ECR (the git commit; make up sets it)."
+  description = "Tag of the API and UI images in ECR (the git commit; make up sets it)."
   type        = string
 }
 

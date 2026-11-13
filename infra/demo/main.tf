@@ -1,15 +1,32 @@
 # The demo stack: brought up with `make up`, destroyed with `make down`.
-# Everything here is disposable -- the ECR repository, the UI bucket and the
-# API-key secret are all deleted on destroy.
+# Everything here is disposable -- the ECR repositories and the API-key
+# secret are deleted on destroy. The DNS zone and the TLS certificate it
+# uses live in the long-lived account stack, so the address stays the same.
+
+data "aws_route53_zone" "this" {
+  name = var.domain_name
+}
+
+data "aws_acm_certificate" "this" {
+  domain      = var.domain_name
+  statuses    = ["ISSUED"]
+  most_recent = true
+}
 
 module "network" {
   source = "../modules/network"
   name   = var.name
 }
 
-module "ecr" {
+module "ecr_api" {
   source       = "../modules/ecr"
   name         = var.name
+  force_delete = true
+}
+
+module "ecr_ui" {
+  source       = "../modules/ecr"
+  name         = "${var.name}-ui"
   force_delete = true
 }
 
@@ -21,40 +38,38 @@ resource "aws_secretsmanager_secret" "gemini_api_key" {
   recovery_window_in_days = 0 # delete at once on destroy, so the name is free for the next make up
 }
 
-resource "random_password" "origin_verify" {
-  length  = 32
-  special = false
-}
-
 module "service" {
   source = "../modules/service"
 
   name               = var.name
   vpc_id             = module.network.vpc_id
   subnet_ids         = module.network.public_subnet_ids
-  image              = "${module.ecr.repository_url}:${var.image_tag}"
-  repository_arn     = module.ecr.repository_arn
+  api_image          = "${module.ecr_api.repository_url}:${var.image_tag}"
+  ui_image           = "${module.ecr_ui.repository_url}:${var.image_tag}"
+  repository_arns    = [module.ecr_api.repository_arn, module.ecr_ui.repository_arn]
   api_key_secret_arn = aws_secretsmanager_secret.gemini_api_key.arn
+  certificate_arn    = data.aws_acm_certificate.this.arn
   task_cpu           = var.task_cpu
   task_memory        = var.task_memory
   desired_count      = var.desired_count
 
-  origin_verify_header_value = random_password.origin_verify.result
-
   environment = {
     LOG_LEVEL = "INFO"
-    # Viewer -> CloudFront -> ALB -> task: two proxies append to X-Forwarded-For.
-    TRUSTED_PROXY_HOPS = "2"
-    # The UI is served from the same CloudFront origin, so no CORS origins.
+    # Viewer -> ALB -> task: the ALB appends the client to X-Forwarded-For.
+    TRUSTED_PROXY_HOPS = "1"
+    # The UI is served from the same origin (the ALB routes / to it), so no CORS.
     CORS_ALLOW_ORIGINS = ""
   }
 }
 
-module "frontend" {
-  source = "../modules/frontend"
+resource "aws_route53_record" "alias" {
+  zone_id = data.aws_route53_zone.this.zone_id
+  name    = var.domain_name
+  type    = "A"
 
-  name                       = var.name
-  api_origin_domain          = module.service.alb_dns_name
-  origin_verify_header_value = random_password.origin_verify.result
-  force_destroy              = true
+  alias {
+    name                   = module.service.alb_dns_name
+    zone_id                = module.service.alb_zone_id
+    evaluate_target_health = true
+  }
 }

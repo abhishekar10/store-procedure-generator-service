@@ -7,9 +7,9 @@ built to be one component of a larger system: it has a versioned contract
 three swappable interfaces rather than on particular vendors.
 
 What runs today runs locally with `docker compose`. The AWS deployment
-described below (CloudFront, an ALB, ECS Fargate) is written as Terraform in
-[`infra/`](../infra/README.md) and has been planned against the account, but
-**not yet applied**.
+described below (an HTTPS ALB in front of ECS Fargate, at
+`sqlgen.abhishek.gen.in`) is written as Terraform in
+[`infra/`](../infra/README.md), but **not yet applied**.
 
 ## Where it sits
 
@@ -34,9 +34,9 @@ flowchart LR
 **The gateway owns authentication and authorisation.** The service has no
 auth code by design: it trusts any request that reaches it, so it must only
 be reachable through something that has already decided the caller may use
-it. In the AWS deployment that is CloudFront and then an ALB, which admits
-only CloudFront; authentication there would be the ALB's OIDC/Cognito
-integration or an identity-aware proxy in front of it (neither is built). An ALB rather than API Gateway because API Gateway's
+it. In the AWS deployment that is an ALB terminating TLS; authentication
+there would be the ALB's OIDC/Cognito integration or an identity-aware proxy
+in front of it (neither is built). An ALB rather than API Gateway because API Gateway's
 default 29-second integration timeout is below the service's 200-second
 generation timeout. Per-caller quotas also belong at the gateway or WAF; the
 service's own token bucket (`app/ratelimit.py`) is a per-task fallback, keyed

@@ -1,27 +1,23 @@
 output "url" {
   description = "The demo: UI at /, API at /v1/..., API docs at /api/docs."
-  value       = module.frontend.url
+  value       = "https://${var.domain_name}"
 }
 
 output "alb_url" {
-  description = "The ALB. Not reachable directly: it admits only CloudFront, and only with this stack's origin header."
-  value       = "http://${module.service.alb_dns_name}"
+  description = "The ALB's own name. Its certificate is for the domain, so use `url` instead."
+  value       = "https://${module.service.alb_dns_name}"
 }
 
-output "ecr_repository_url" {
-  value = module.ecr.repository_url
+output "ecr_api_repository_url" {
+  value = module.ecr_api.repository_url
+}
+
+output "ecr_ui_repository_url" {
+  value = module.ecr_ui.repository_url
 }
 
 output "api_key_secret_id" {
   value = aws_secretsmanager_secret.gemini_api_key.id
-}
-
-output "ui_bucket" {
-  value = module.frontend.bucket_name
-}
-
-output "cloudfront_distribution_id" {
-  value = module.frontend.distribution_id
 }
 
 output "cluster_name" {

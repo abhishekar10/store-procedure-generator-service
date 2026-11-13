@@ -83,9 +83,9 @@ Built: the service, its hardening, the stateless `/v1` API, the adapters,
 the checked-in contract, the container images and local compose.
 
 Written and planned, **not yet applied**: Terraform for AWS in
-[`infra/`](infra/README.md) -- ECS Fargate behind an ALB, the UI and API
-under one CloudFront HTTPS address, and a budget kill switch -- driven by
-`make up` / `make down`, with a cost estimate.
+[`infra/`](infra/README.md) -- the API and UI on ECS Fargate behind an HTTPS
+ALB at `https://sqlgen.abhishek.gen.in`, and a budget kill switch (applied
+and tested) -- driven by `make up` / `make down`, with a cost estimate.
 
 Planned, not built: CI/CD on GitHub Actions. See
 [`MIGRATION_STATUS.md`](MIGRATION_STATUS.md).

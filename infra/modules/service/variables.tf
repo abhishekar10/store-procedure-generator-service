@@ -1,5 +1,5 @@
 variable "name" {
-  description = "Name prefix: cluster, ALB and log group use it as is; the service and target group add -api."
+  description = "Name prefix: cluster, ALB, task family and log group use it as is; the service adds -api."
   type        = string
 }
 
@@ -12,13 +12,23 @@ variable "subnet_ids" {
   type        = list(string)
 }
 
-variable "image" {
-  description = "Full image reference, repository URL plus tag."
+variable "api_image" {
+  description = "API image reference, repository URL plus tag."
   type        = string
 }
 
-variable "repository_arn" {
-  description = "ECR repository the execution role may pull from."
+variable "ui_image" {
+  description = "UI (nginx) image reference, repository URL plus tag."
+  type        = string
+}
+
+variable "repository_arns" {
+  description = "ECR repositories the execution role may pull from."
+  type        = list(string)
+}
+
+variable "certificate_arn" {
+  description = "ACM certificate for the HTTPS listener (issued, in this region)."
   type        = string
 }
 
@@ -31,11 +41,6 @@ variable "environment" {
   description = "Plain (non-secret) environment variables for the container."
   type        = map(string)
   default     = {}
-}
-
-variable "container_port" {
-  type    = number
-  default = 8000
 }
 
 variable "task_cpu" {
@@ -58,16 +63,4 @@ variable "desired_count" {
 variable "log_retention_days" {
   type    = number
   default = 7
-}
-
-variable "origin_verify_header_name" {
-  description = "Header CloudFront adds to every origin request; the ALB forwards only requests that carry it."
-  type        = string
-  default     = "X-Origin-Verify"
-}
-
-variable "origin_verify_header_value" {
-  description = "Its value. Not a credential for users -- it only proves a request came through this distribution."
-  type        = string
-  sensitive   = true
 }

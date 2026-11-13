@@ -5,9 +5,12 @@
 #   1. terraform apply with zero API tasks -- the one approval prompt; it
 #      shows the whole plan
 #   2. write GEMINI_API_KEY from .env into Secrets Manager (never into state)
-#   3. build the API image and push it to ECR, tagged with the git commit
-#   4. build the UI for same-origin API calls and upload it to S3
-#   5. scale the service up and wait until the ALB reports it healthy
+#   3. build the API and UI images and push them to ECR, tagged with the git
+#      commit (the UI is built for same-origin API calls)
+#   4. scale the service up and wait until the ALB reports it healthy
+#
+# Needs the account stack's DNS zone and certificate (make dns-zone, then
+# make account-apply; see infra/README.md).
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -16,8 +19,6 @@ REGION="${AWS_REGION:-ap-south-1}"
 TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
 COUNT="${DESIRED_COUNT:-1}"
 TF="terraform -chdir=infra/demo"
-NODE_IMAGE="node:22.22.1-slim" # the version frontend/Dockerfile builds with
-UI_DIST="infra/.build/ui"      # gitignored; vite empties it on each build
 
 step() { printf '\n== %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -40,24 +41,24 @@ step "API key -> Secrets Manager"
 printf '%s' "$GEMINI_API_KEY" |
   aws secretsmanager put-secret-value --secret-id "$(out api_key_secret_id)" --secret-string file:///dev/stdin >/dev/null
 
-step "API image $TAG -> ECR"
-REPO="$(out ecr_repository_url)"
-if aws ecr describe-images --repository-name "${REPO#*/}" --image-ids "imageTag=$TAG" >/dev/null 2>&1; then
-  echo "already pushed"
-else
-  aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${REPO%%/*}" >/dev/null
-  DOCKER_BUILDKIT=1 docker build --secret id=gemini_key,env=GEMINI_API_KEY -t "$REPO:$TAG" backend/
-  docker push "$REPO:$TAG"
-fi
+# push <repository-url> <docker build args...>: build and push unless the tag exists.
+push() {
+  local repo="$1"
+  shift
+  if aws ecr describe-images --repository-name "${repo#*/}" --image-ids "imageTag=$TAG" >/dev/null 2>&1; then
+    echo "${repo#*/}:$TAG already pushed"
+    return
+  fi
+  DOCKER_BUILDKIT=1 docker build -t "$repo:$TAG" "$@"
+  docker push "$repo:$TAG"
+}
 
-step "UI -> S3"
-mkdir -p "$UI_DIST"
-# VITE_API_BASE_URL empty: the UI calls /v1/... on its own (CloudFront) origin.
-docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e VITE_API_BASE_URL= \
-  -v "$PWD/frontend:/src:ro" -v "$PWD/$UI_DIST:/out" "$NODE_IMAGE" \
-  sh -c 'cp -r /src /tmp/w && cd /tmp/w && npm ci --silent && npx vite build --outDir /out --emptyOutDir'
-aws s3 sync "$UI_DIST" "s3://$(out ui_bucket)" --delete
-aws cloudfront create-invalidation --distribution-id "$(out cloudfront_distribution_id)" --paths '/*' >/dev/null
+step "images $TAG -> ECR"
+API_REPO="$(out ecr_api_repository_url)"
+aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${API_REPO%%/*}" >/dev/null
+push "$API_REPO" --secret id=gemini_key,env=GEMINI_API_KEY backend/
+# VITE_API_BASE_URL empty: the UI calls /v1/... on its own origin.
+push "$(out ecr_ui_repository_url)" --build-arg VITE_API_BASE_URL= frontend/
 
 step "scale to $COUNT task(s) and wait for healthy"
 $TF apply -input=false -auto-approve -var "image_tag=$TAG" -var "desired_count=$COUNT"

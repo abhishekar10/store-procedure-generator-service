@@ -12,6 +12,11 @@ import {
   id = "${data.aws_caller_identity.current.account_id}:monthly-1000-inr"
 }
 
+module "domain" {
+  source      = "../modules/domain"
+  domain_name = var.domain_name
+}
+
 module "kill_switch" {
   source = "../modules/kill_switch"
 

@@ -26,6 +26,12 @@ variable "kill_switch_threshold" {
   default     = 95
 }
 
+variable "domain_name" {
+  description = "Subdomain the demo is served at, delegated to Route 53 from the parent domain's DNS."
+  type        = string
+  default     = "sqlgen.abhishek.gen.in"
+}
+
 variable "demo_name" {
   description = "The demo stack's `name`; the kill switch targets its cluster, service and ALB by it."
   type        = string

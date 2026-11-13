@@ -539,27 +539,32 @@ Original plan for this phase:
 
 ### Phase 5 — Terraform (`infra/`, ap-south-1)
 
-**Pick up here (2026-11-14, end of day).** First `make up` failed at CloudFront: *"Your
-account must be verified before you can add new CloudFront resources"* (new-account
-restriction; needs an AWS Support case). The partial stack was destroyed with `make down`
-(state empty, ALB gone); the account stack (budget + kill switch, live-tested) is up.
-The owner then said they **own `abhishek.gen.in`**, which removes the need for CloudFront:
+**Redesigned (2026-11-15): HTTPS on the owner's domain, no CloudFront.** The first `make up`
+failed at CloudFront (*"Your account must be verified before you can add new CloudFront
+resources"* — a new-account restriction); the partial stack was destroyed. The owner owns
+`abhishek.gen.in` (DNS at GoDaddy, `ns03`/`ns04.domaincontrol.com`) and chose
+**`sqlgen.abhishek.gen.in`**, delegated to Route 53 ($0.50/month, agreed). Now:
 
-- **Proposed redesign (not started):** ACM certificate + HTTPS listener on the ALB (80 →
-  443 redirect); the UI as an nginx container in the same Fargate task, ALB routing
-  `/v1/*` and `/api/*` to the API and the rest to the UI — one HTTPS origin, no CORS, no
-  CloudFront/S3, no 60s CloudFront timeout, and a **stable URL** across up/down. ALB open
-  to the internet on 443; `TRUSTED_PROXY_HOPS=1`; drop the origin-verify header and prefix
-  list. DNS: a Route 53 hosted zone for the subdomain in the **account** stack ($0.50/mo),
-  delegated by NS records at the owner's DNS provider once; the demo stack then manages
-  the ACM validation and alias records each `make up`.
-- **Open questions for the owner:** (1) who hosts `abhishek.gen.in`'s DNS, and is the
-  Route 53 subdomain delegation OK; (2) which subdomain (`sp.` / `sqlgen.` / `demo.`).
-- The CloudFront Support case is then optional.
+- `account/` adds `modules/domain`: the Route 53 zone and a DNS-validated ACM certificate,
+  both long-lived (stable name servers; the certificate renews itself).
+- `demo/`: the ALB serves HTTPS (TLS 1.2/1.3 policy) with that certificate, 80 → 443
+  redirect; one Fargate task runs `api` and `ui` (nginx) containers; `/v1/*` and `/api/*`
+  → API, the rest → UI. A Route 53 alias points the domain at each new ALB.
+  `TRUSTED_PROXY_HOPS=1`. Two ECR repositories. `modules/frontend` (S3 + CloudFront),
+  the origin-verify header and the CloudFront prefix list are gone.
+- **Spec deviation:** RAG_SERVICE_INSTRUCTIONS asks for "S3 plus CloudFront for the demo
+  UI" and a "CloudFront URL" output. Replaced by the UI container behind the ALB because
+  CloudFront is blocked on this account; the owner chose the domain route. CloudFront can
+  return later as a CDN in front of the ALB once the account is verified.
+- First-time order: `make dns-zone` → 4 NS records named `sqlgen` at GoDaddy →
+  `make dns-check` → `make account-apply` (waits for the certificate) → `make up`.
+- Verified offline: both stacks validate; `account` plans 4 adds (zone, cert, validation
+  record, validation); the UI image built with an empty API base serves `/` with 200 and
+  compiles the base to `""`. The demo stack cannot be planned until the zone and
+  certificate exist (it looks them up).
 
-**Status (2026-11-14): written, validated and planned; not applied.** See `infra/README.md`.
-Decision taken with the owner: **no domain → CloudFront in front of both UI and API** (one
-HTTPS origin; CloudFront → ALB is HTTP). Two root stacks: `infra/demo` (34 resources, `make
+**Earlier status (2026-11-14, CloudFront design, superseded above):** written, validated
+and planned. Decision then: **no domain → CloudFront in front of both UI and API**. Two root stacks: `infra/demo` (34 resources, `make
 up`/`make down`) and `infra/account` (budget adopted via `import` + kill switch, 10 resources;
 plan: 1 import, 10 add, 1 in-place change adding the SNS topic to the 95% notification).
 Departures from the original plan below, each for a reason:
@@ -647,7 +652,8 @@ fix (it used `DO $$` blocks), so it was replaced by a fresh, Postgres-checked sa
   There are no git credentials configured on this machine — no helper, no
   `~/.git-credentials`, no SSH keys — so the owner pushes from VS Code's source control
   panel, not the CLI.
-- **Demo stack: down** (destroyed after the CloudFront failure; see Phase 5 "Pick up here").
+- **Demo stack: down** (destroyed after the CloudFront failure; redesigned for
+  `sqlgen.abhishek.gen.in` — see Phase 5).
 - **Account stack: up** — budget `monthly-1000-inr` with the kill switch on 95%; the
   kill switch was triggered by hand with nothing deployed and reported "already down" for
   both targets; the report email subscription is confirmed.

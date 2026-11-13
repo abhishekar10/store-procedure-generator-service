@@ -1,6 +1,6 @@
 // Unset: a local backend. Set to "" (as the AWS build does): same origin, so
-// the UI calls /v1/... on whatever host served it -- CloudFront routes /v1/*
-// to the API, and no CORS is involved.
+// the UI calls /v1/... on whatever host served it -- the ALB routes /v1/* to
+// the API and everything else to the UI, and no CORS is involved.
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 function parseSSEBlock(block) {
