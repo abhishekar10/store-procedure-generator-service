@@ -539,6 +539,24 @@ Original plan for this phase:
 
 ### Phase 5 — Terraform (`infra/`, ap-south-1)
 
+**Pick up here (2026-11-14, end of day).** First `make up` failed at CloudFront: *"Your
+account must be verified before you can add new CloudFront resources"* (new-account
+restriction; needs an AWS Support case). The partial stack was destroyed with `make down`
+(state empty, ALB gone); the account stack (budget + kill switch, live-tested) is up.
+The owner then said they **own `abhishek.gen.in`**, which removes the need for CloudFront:
+
+- **Proposed redesign (not started):** ACM certificate + HTTPS listener on the ALB (80 →
+  443 redirect); the UI as an nginx container in the same Fargate task, ALB routing
+  `/v1/*` and `/api/*` to the API and the rest to the UI — one HTTPS origin, no CORS, no
+  CloudFront/S3, no 60s CloudFront timeout, and a **stable URL** across up/down. ALB open
+  to the internet on 443; `TRUSTED_PROXY_HOPS=1`; drop the origin-verify header and prefix
+  list. DNS: a Route 53 hosted zone for the subdomain in the **account** stack ($0.50/mo),
+  delegated by NS records at the owner's DNS provider once; the demo stack then manages
+  the ACM validation and alias records each `make up`.
+- **Open questions for the owner:** (1) who hosts `abhishek.gen.in`'s DNS, and is the
+  Route 53 subdomain delegation OK; (2) which subdomain (`sp.` / `sqlgen.` / `demo.`).
+- The CloudFront Support case is then optional.
+
 **Status (2026-11-14): written, validated and planned; not applied.** See `infra/README.md`.
 Decision taken with the owner: **no domain → CloudFront in front of both UI and API** (one
 HTTPS origin; CloudFront → ALB is HTTP). Two root stacks: `infra/demo` (34 resources, `make
@@ -629,6 +647,10 @@ fix (it used `DO $$` blocks), so it was replaced by a fresh, Postgres-checked sa
   There are no git credentials configured on this machine — no helper, no
   `~/.git-credentials`, no SSH keys — so the owner pushes from VS Code's source control
   panel, not the CLI.
+- **Demo stack: down** (destroyed after the CloudFront failure; see Phase 5 "Pick up here").
+- **Account stack: up** — budget `monthly-1000-inr` with the kill switch on 95%; the
+  kill switch was triggered by hand with nothing deployed and reported "already down" for
+  both targets; the report email subscription is confirmed.
 - **AWS is set up for the CLI (2026-11-14).** Profile `sp-generator`: IAM Identity
   Center (SSO session `personal`), role `AdministratorAccess`, region `ap-south-1`,
   verified with `aws sts get-caller-identity`. When the session expires:
