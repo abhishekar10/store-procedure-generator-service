@@ -1,0 +1,413 @@
+# Migration status and next steps
+
+**Read this first, then `RAG_SERVICE_INSTRUCTIONS.md`** (the original spec, still
+authoritative for scope and working rules). This file records what has actually been
+built and verified, the measurements that constrain the remaining work, and what to do
+next. Everything here was verified by running it — nothing is aspirational. Where a
+claim is a measurement, the number is given.
+
+Last updated after Phase 1. Repo: `github.com/abhishekar10/store-procedure-generator-service`
+
+---
+
+## 1. What this project is
+
+A demonstration of an enterprise-style microservice that generates PL/pgSQL stored
+procedures from plain-English requests, using RAG over two corpora (an HR/payroll
+reference schema, and a library of SQL pattern templates). The React UI is a demo
+client only.
+
+**Scope decisions already made — do not revisit:**
+
+- **Auth is out of scope.** In a real deployment the service sits behind an API gateway
+  or ALB. Document where auth would sit; do not build it.
+- Hardening is at microservice level only: validation, rate limiting, timeouts, retries,
+  safe config.
+- The service must become stateless. The caller owns conversation history.
+- This is shown to employers. **Never claim anything that does not exist.** Label
+  anything unbuilt as "planned".
+
+---
+
+## 2. Environment
+
+This repo was extracted out of a notes monorepo. It no longer depends on any parent
+directory.
+
+| Thing | Where |
+|---|---|
+| Repo root | `~/Desktop/store-procedure-generator-service` |
+| Python venv | `backend/.venv` (Python 3.12.13) |
+| Python interpreter | uv-managed, at `~/.local/share/uv/python` — **not** snap-scoped |
+| Secrets | `.env` at repo root, gitignored, mode 600. Template: `.env.example` |
+| Terraform 1.17.2 | `~/.local/bin/terraform` |
+| AWS CLI 2.40.2 | `~/.local/bin/aws` |
+
+### Why the interpreter location matters
+
+The original shared venv was built against a VS Code **snap revision** path
+(`~/snap/code/253/...`). The snap updated, that path vanished, and the venv broke
+completely — nothing could run. The new venv deliberately uses a uv-managed interpreter
+under `~/.local/share/uv/python`, which survives snap updates. If you recreate the venv,
+keep it off the snap path.
+
+```bash
+cd backend
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e ".[dev]"
+```
+
+### Everyday commands
+
+```bash
+cd backend
+
+.venv/bin/python -m pytest -q          # 20 offline tests, ~0.03s, no API key needed
+.venv/bin/python -m pytest evals/ -q   # 15 live-API evals, ~95s, costs real tokens
+.venv/bin/ruff check .                 # lint
+.venv/bin/ruff check . --fix
+
+.venv/bin/python db/build_db.py        # rebuild reference.db (no key needed)
+.venv/bin/python -m app.rag.ingest     # re-embed both collections (needs key)
+
+.venv/bin/python -m uvicorn app.main:app --reload --port 8000
+```
+
+Container:
+
+```bash
+export GEMINI_API_KEY=$(grep '^GEMINI_API_KEY=' .env | cut -d= -f2-)
+
+DOCKER_BUILDKIT=1 docker build \
+    --secret id=gemini_key,env=GEMINI_API_KEY \
+    -t sp-generator:dev backend/
+
+docker compose up --build -d    # UI :5173, API :8000
+docker compose down
+```
+
+---
+
+## 3. What is done
+
+### Phase 0 — extraction (complete)
+
+Extracted from `Notes/rag/05 - RAG Project` with `git subtree split`, preserving all 3
+commits that touched the project. One extra commit carries over
+`RAG_SERVICE_INSTRUCTIONS.md` (it lived untracked at the notes root) and the
+`.env` / `.venv` ignore rules (they lived in the parent `rag/.gitignore`).
+
+### Phase 1 — self-contained, configurable, containerised (complete)
+
+**`backend/app/config.py` fully rewritten.** This was blocking everything: the old file
+ran `os.environ["GEMINI_API_KEY"]` at import, so after extraction all 20 offline tests
+died with a `KeyError` before collection, and a container without a key would
+crash-loop with an opaque traceback.
+
+Now a `pydantic-settings` `Settings` model behind a cached `get_settings()`. Nothing is
+read at import. `settings.require_gemini_api_key()` raises `ConfigError` at the point of
+use with an actionable message. Every call site was updated — `config.FOO` constants no
+longer exist.
+
+Note `cors_allow_origins` uses `Annotated[list[str], NoDecode]`. Without `NoDecode`,
+pydantic-settings tries to JSON-parse the env var before validators run, so a plain
+comma-separated string fails. Remember this if you add another list-typed setting.
+
+**`backend/pyproject.toml`** replaces `requirements.txt` and `pytest.ini` (both deleted).
+Pins the 7 dependencies actually imported. The old shared requirements file carried 11
+packages for four unrelated exercises; 8 were unused here. Dropping
+`sentence-transformers` drops `torch`: **5.4 GB → 402 MB**.
+
+`torch`/`transformers` are optional because `langchain_core/language_models/base.py`
+wraps the import in `try/except ImportError`. Do not add anything that hard-requires
+them.
+
+**Ruff** configured (line-length 120, matching existing style) and all 20 first-run
+findings fixed. The only substantive one: `zip()` in `retriever.py` now passes
+`strict=True`, so a length mismatch from Chroma fails loudly instead of silently
+truncating results.
+
+**`/health` and `/ready` added.** `/health` is dependency-free liveness. `/ready` checks
+config present, reference DB readable, both Chroma collections non-empty; returns 503
+with a per-check breakdown. It makes no Gemini call, so the ALB can poll it for free.
+
+**CORS** now comes from config and defaults to `[]`. `allow_origins=["*"]` is gone, as
+are the blanket method/header wildcards.
+
+**Containers.** `backend/Dockerfile` is multi-stage (deps → corpus → runtime). The
+corpus is baked in at build time; the running container does no startup work. The
+ingest needs the embeddings API, so the key is a **BuildKit secret** for that one `RUN`
+— verified it appears **zero times** in `docker history`. Runtime is non-root (uid
+10001), app code root-owned, only `/srv/data` writable.
+
+`frontend/Dockerfile` builds the Vite bundle and serves it from nginx with SPA fallback.
+`VITE_API_BASE_URL` is inlined at **build** time, so it is a build arg, not a runtime
+env var — this matters for the CloudFront deploy.
+
+`docker compose up` works with only `GEMINI_API_KEY` set.
+
+### Verified end to end
+
+- 20/20 offline tests pass with `GEMINI_API_KEY` unset.
+- 15/15 live evals pass (~95s).
+- `ruff check` clean.
+- Image builds; `/health`, `/ready`, `/schema`, `/api/docs` all 200 in the container.
+- CORS allows the configured origin, refuses others.
+- A real generation through the container returned a valid 7-section script in **159s**,
+  retrieving `payroll_runs` and `payroll_entries` as the top two tables.
+
+---
+
+## 4. Measurements that constrain the remaining work
+
+### 4.1 Generation takes 133–177 seconds
+
+Measured repeatedly. Telemetry from live runs: `avg_generation_latency_ms = 171,722`;
+classifier ~4.7s, retrieval ~0.6s, generation ~172s.
+
+**This is the dominant architectural constraint.**
+
+- ALB's default idle timeout is 60s and would kill every request. **Set
+  `idle_timeout = 300`.**
+- API Gateway cannot be used at all — hard 29s cap, not configurable.
+- Health-check and deregistration-delay settings must not inherit request-length
+  assumptions, or deploys will cut off live generations.
+- Any retry wrapper must not blindly retry a 172s call.
+
+Decision taken: **keep SSE and tune timeouts.** No async job API.
+
+### 4.2 The section-marker defect (not yet fixed — this is the next task)
+
+Reproduced on two different prompts. The model emits the full
+`CREATE OR REPLACE PROCEDURE <main_operation>` under `-- SECTION: ROLLBACK_AUTO`
+(4.3 KB and 5.1 KB respectively) while `-- SECTION: MAIN_SCRIPT` gets a 98–240 char
+fragment. `rollback_auto` contained no `ROLLBACK` at all.
+
+Both outputs reported `sql_valid: true`, because `validator.py` only checks marker
+presence, non-emptiness and balanced parens/`$$`.
+
+The UI never renders `sections` (it shows `full_script` via `CodeBlock`), so this is
+invisible in the demo — but it is wrong in the API contract, and the seven-section
+structure is the project's central claim.
+
+### 4.3 There are TWO LLM construction sites
+
+- `generator.py` `_build_llm()` — used by generation and streaming.
+- `generator.py` `classify_request()` — **inlines its own `ChatGoogleGenerativeAI`** at
+  `temperature=0`.
+
+Timeouts, retries and test mocks must cover **both**. Patching `_build_llm` alone still
+lets the classifier make a live call.
+
+### 4.4 Ingest leaves orphaned Chroma segments
+
+`_replace_collection()` hard-deletes and recreates both collections every run, minting
+new segment UUIDs. Chroma does not reclaim the old directories. The old local store had
+**10 segment dirs / 13 MB for 15 embeddings; only 2 were live**. A clean ingest gives
+3.0 MB / 2 dirs.
+
+`.dockerignore` keeps the local store out of the image, so the image is unaffected. But
+`_replace_collection` should still clean up after itself.
+
+### 4.5 Image is 865 MB
+
+Higher than the ~500 MB originally estimated. 151 MB of that is `kubernetes` (83 MB) and
+`onnxruntime` (68 MB), hard dependencies of chromadb for distributed mode and its default
+embedding function. **Verified neither is ever imported at runtime.**
+
+Pruning them from `site-packages` was considered and **rejected**: it risks an
+`ImportError` on an untested chromadb path, for a saving worth pennies of ECR storage.
+Do not prune without a strong reason.
+
+### 4.6 The RAG layer is already stateless
+
+`generate_stored_procedure`, `stream_stored_procedure` and `classify_request` all already
+take `prior_messages` as plain dicts. **All store coupling lives in `main.py` alone.**
+This makes Phase 3 much smaller than it looks.
+
+---
+
+## 5. Decisions taken with the owner — do not re-litigate
+
+| Decision | Choice |
+|---|---|
+| Repo | Standalone public GitHub repo (done) |
+| Latency | Keep SSE, tune timeouts (ALB idle 300s). No async job API |
+| Section bug | Fix early, before hardening. Re-baseline evals |
+| AWS region | `ap-south-1` (Mumbai) |
+| AWS apply | Build and validate freely. **`terraform apply` only on the owner's explicit in-session go-ahead**, then destroy |
+| UI history | Keep the sidebar, backed by localStorage |
+| Metrics | CloudWatch EMF via logs (not a `/metrics` endpoint) |
+
+Budget is small — roughly ₹1,000–2,000. Bring the stack up for demos and destroy it
+afterwards. Never leave anything running that costs money without saying so.
+
+---
+
+## 6. What to do next
+
+### Phase 1b — fix generation quality (do this first)
+
+- **`SYSTEM_PROMPT` in `app/rag/generator.py`**: give each of the 7 markers an explicit
+  content contract. State that the complete procedure body belongs in `MAIN_SCRIPT` and
+  that `ROLLBACK_AUTO` holds only the `EXCEPTION` block. Add one short worked example —
+  the current prompt describes the structure but never shows it.
+- **`app/rag/validator.py`**: flag `CREATE OR REPLACE PROCEDURE` appearing outside
+  `MAIN_SCRIPT`, and a `MAIN_SCRIPT` dwarfed by another section. Those are the two
+  signatures of the observed failure.
+- Add a generation-shape eval over the 4 golden prompts, then re-baseline.
+- Verify by re-running the golden prompts and confirming the procedure lands in
+  `MAIN_SCRIPT`.
+
+### Phase 2 — hardening
+
+- **Validation**: prompt `min_length=1`, `max_length` ~8000, bounded `messages` list.
+  Today an empty prompt and a 200,000-char prompt both sail through to generation.
+- **Timeouts and retries on both LLM sites** (see 4.3). Consolidate `classify_request`
+  onto a shared factory first. Reuse langchain's built-in `.with_retry()` and the
+  client timeout rather than adding `tenacity`. Retry transient 429/5xx only.
+  Generation timeout must exceed 180s.
+- **Typed errors**: upstream failure returns 503 with a stable error code. Today
+  `/generate` returns a bare 500 with a full traceback in the log, and
+  `/generate/stream` emits the raw Google error JSON straight to the browser. Both leak.
+- **Rate limiting**: small in-process token bucket, no new dependency. Document that the
+  real limit belongs at ALB/WAF.
+- **`/ingest` leaves HTTP** — becomes `python -m app.rag.ingest` only. Fix
+  `_replace_collection` to clean orphaned segments while you are in there.
+- **Structured JSON logging** via stdlib `logging` plus a `contextvar` request-ID
+  middleware. Log latency, retrieved tables and scores, accept/reject, validator result.
+  Do not log full prompts at INFO.
+- **Metrics as CloudWatch EMF log lines.** The 15 keyword arguments of the existing
+  `telemetry_store.log_event` are exactly the field list to emit.
+- **Graceful shutdown**, and get the sync LLM calls off the event loop properly.
+
+### Phase 3 — stateless and pluggable
+
+- **Delete `app/db/conversation_store.py` and `app/db/telemetry_store.py`.** Remove
+  `GET /conversations`, `GET /conversations/{id}`, `DELETE /conversations/{id}` and
+  `GET /metrics`. `_prior_messages_for` goes. `get_last_user_message` is already dead
+  code (nothing imports it).
+- **`/v1/generate` and `/v1/generate/stream`** accept `messages: list[Message]` in the
+  body. Responses drop `conversation_id` and `message_id`. **`is_regenerate`
+  disappears** — the client just resends without the last assistant turn.
+  `evals/test_classifier_eval.py`'s `PAYROLL_PRIOR_MESSAGES` is already in the right
+  shape to model the request body on.
+- **Three adapters**, selected by configuration, no speculative extras: `LLMProvider`
+  (Gemini), `VectorStore` (Chroma), `SchemaSource` (SQLite). Note that
+  `db/reference_schema.py:list_tables()` and `rag/ingest.py:_build_schema_chunks()`
+  duplicate the metadata-join with slightly different output shapes — that duplication
+  is the seam to consolidate behind `SchemaSource`.
+- **Checked-in OpenAPI spec** with request/response examples.
+- **`docs/ARCHITECTURE.md`**: gateway in front, where auth would sit, caller-owned
+  state, adapter swapping, Mermaid request flow. `planning/00-overview.md`'s diagram
+  ends in an `app.db: history` node that this phase invalidates — update or annotate it.
+
+**Frontend work** (all of `frontend/src/`):
+
+- Add `conversationStore.js` keeping the current server-side shape in localStorage.
+  Reuse the lazy-initializer + effect pattern already used for theme in `App.jsx`, but
+  wrap storage access in `try/catch` — the theme code does not, and private-mode or
+  blocked site data will throw.
+- `api.js` loses `listConversations`, `getConversation`, `deleteConversation`, and
+  `streamGenerate` sends `messages` instead of `conversation_id`/`is_regenerate`. All
+  URLs gain the `/v1` prefix.
+- `App.jsx` is the bulk of it: `activeConversationId` currently arrives from the `start`
+  SSE event, and `handleRegenerate` is guarded by `if (!activeConversationId) return;`
+  and sends `prompt: ""`. Both go.
+- `Sidebar.jsx` is purely presentational and needs no change beyond its data source.
+- Fix `RetrievedContextPanel.jsx`: it dereferences `chunk.metadata` without optional
+  chaining and will throw on a malformed chunk.
+- `sections` is carried in App state but rendered nowhere. Either surface it or drop it
+  — do not leave it as dead weight while claiming the seven-section structure is the
+  product.
+
+### Phase 4 — tests
+
+- The 9 pure tests in `test_section_parser.py` and `test_validator.py` survive untouched.
+- The 10 tests in `test_conversation_store.py` and `test_telemetry_store.py` are deleted
+  with the stores. `conftest.py`'s `isolated_app_db` fixture then has no users —
+  replace it with LLM/embedding fakes.
+- **API tests** with `TestClient` and **both** LLM sites mocked: happy path, classifier
+  rejection, validation errors, upstream 503, SSE event shape. The mocking pattern that
+  works is patching the module-level factory functions
+  (`app.rag.generator._build_llm`, `app.rag.retriever._get_embeddings`), because
+  everything resolves `config.`-style settings at call time, not import time.
+- **One contract test** pinning the `/v1` response shape to the checked-in OpenAPI spec.
+- Evals stay live-API and out of the default run. **`test_retrieval_eval.py` needs a
+  populated vector store**, so its CI job must build the index before running.
+
+### Phase 5 — Terraform (`infra/`, ap-south-1)
+
+Modules: `network`, `ecr`, `service`, `frontend`.
+
+ECS Fargate (0.5 vCPU / 1 GB), ECR, ALB with health check on `/ready`, Secrets Manager
+for `GEMINI_API_KEY`, CloudWatch log group with short retention, least-privilege IAM,
+S3 + CloudFront for the UI. Public subnets plus security groups, **no NAT gateway**
+(cost). Local state, stated as such in the README.
+
+**`idle_timeout = 300` on the ALB is the single most important setting here.** See 4.1.
+
+Variables: region, image tag, desired count. Outputs: ALB URL, CloudFront URL.
+Cost guard: `make up` / `make down`.
+
+### Phase 6 — CI/CD
+
+- `ci.yml`: ruff, pytest, `terraform fmt`/`validate`, Docker build, `pip-audit`.
+- `deploy.yml`: build and push to ECR tagged with the commit SHA, update ECS, wait for
+  stability. **GitHub OIDC**, no long-lived access keys.
+- `evals.yml`: manual plus optional nightly, uploads results as an artefact.
+- Status badge and a "how it deploys" section in the README.
+
+**CI needs `GEMINI_API_KEY` as a repository secret** — the Docker build runs the ingest.
+Pass it with `--secret id=gemini_key,env=GEMINI_API_KEY`, never as a build ARG.
+
+---
+
+## 7. Known issues not yet addressed
+
+- **`README.md` files are stale.** `backend/README.md` and `frontend/README.md` still
+  describe the old monorepo layout: a shared `rag/.venv`, `pip install -r
+  requirements.txt`, `cd "05 - RAG Project/backend"`, and a `GEMINI_API_KEY` read from
+  `rag/.env`. `backend/README.md` also documents `/conversations` and `/metrics`, which
+  Phase 3 removes. The root has no README at all yet.
+- `backend/evals/test_retrieval_eval.py` and `backend/README.md` cite
+  `06 - Interview Questions/00-review-findings.md`, which did not travel with the
+  extraction. Rewrite those citations to stand alone.
+- `frontend/.env.local` (gitignored) still points at a hardcoded LAN IP
+  `http://192.168.1.11:8000`. Harmless for compose, breaks `npm run dev` when the DHCP
+  lease changes.
+- `planning/*.md` are historical design notes, partly superseded. `01-frontend.md`
+  already carries a "superseded" banner. Do not treat them as current spec.
+- `stored-procs/onboard_a_new_employee_and_record_their_.sql` is a saved generation
+  output, not source. It belongs in `docs/sample-output/`.
+- Retrieval precision is loose on some prompts — all 9 tables live in one domain, so
+  embeddings cluster tightly. The eval thresholds (recall ≥ 0.5 per case, ≥ 0.6 mean)
+  are regression canaries, **not** a claim that retrieval is good.
+
+---
+
+## 8. State right now
+
+- **2 commits are local and unpushed** (`f27b99f`, `9377c71`). There are no git
+  credentials configured on this machine — no helper, no `~/.git-credentials`, no SSH
+  keys — so push from VS Code's source control panel, not the CLI.
+- **`aws configure` has not been run.** Region and credentials are unset. Needed before
+  Phase 5, not before.
+- The compose stack may still be running (`docker compose ps`). `docker compose down`
+  to stop it.
+- `backend/db/reference.db` and `backend/data/vector_store/` exist locally and are
+  gitignored. Rebuild with `db/build_db.py` and `python -m app.rag.ingest`.
+
+---
+
+## 9. Working rules
+
+- Small, reviewable commits with clear messages. Do not rewrite history.
+- Run tests and linters after each phase. **Report honestly what passed and what did
+  not.**
+- Do not add dependencies or abstractions without saying why.
+- **Do not run `terraform apply` or create AWS resources without the owner's explicit
+  go-ahead in that session.** Plan and validate freely.
+- Do not commit secrets. `.env` is gitignored; `.env.example` is the template.
+- If something in the spec conflicts with what the code needs, stop and ask rather than
+  guessing.
