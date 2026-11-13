@@ -337,8 +337,10 @@ different level the classifier still uses. Both levels appear on the
 two generation endpoints, per client IP: 6/minute, burst 3 by default. It is
 a fallback -- each task keeps its own buckets, so N tasks allow N times the
 rate. The real per-client limit belongs in front of the service (AWS WAF
-rate-based rules on the ALB, or API gateway usage plans). Behind an ALB set
-`TRUST_FORWARDED_FOR=true` so the client is taken from `X-Forwarded-For`.
+rate-based rules on the ALB, or API gateway usage plans). Behind proxies,
+set `TRUSTED_PROXY_HOPS` to how many there are (1 behind an ALB, 2 behind
+CloudFront and an ALB) so the client is taken from the right
+`X-Forwarded-For` entry; entries before it are client-supplied and ignored.
 
 **Concurrency and shutdown.** Model calls are blocking, so they run off the
 event loop: `/generate` on FastAPI's threadpool, `/generate/stream` on a

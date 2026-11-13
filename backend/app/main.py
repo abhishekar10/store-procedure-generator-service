@@ -154,9 +154,10 @@ _limiter_lock = threading.Lock()
 
 
 def _client_key(request: Request, settings: Settings) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if settings.trust_forwarded_for and forwarded:
-        return forwarded.split(",")[-1].strip()
+    hops = settings.trusted_proxy_hops
+    forwarded = [entry.strip() for entry in request.headers.get("x-forwarded-for", "").split(",") if entry.strip()]
+    if hops and len(forwarded) >= hops:
+        return forwarded[-hops]
     return request.client.host if request.client else "unknown"
 
 

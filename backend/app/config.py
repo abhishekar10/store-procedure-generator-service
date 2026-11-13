@@ -121,10 +121,13 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_per_minute: float = Field(default=6, gt=0)
     rate_limit_burst: int = Field(default=3, ge=1)
-    # Behind an ALB the TCP peer is the ALB, and the client is the LAST entry
-    # of X-Forwarded-For (the ALB appends it; earlier entries are whatever the
-    # client sent). Only enable this when something trusted sets the header.
-    trust_forwarded_for: bool = False
+    # How many trusted proxies sit in front of the service. Each appends the
+    # address it received the request from to X-Forwarded-For, so with N
+    # proxies the client is the Nth entry from the end; anything before that
+    # is whatever the client sent and cannot be trusted. 0 (the default) uses
+    # the TCP peer and ignores the header. Behind an ALB alone: 1. Behind
+    # CloudFront and then an ALB (the planned AWS deployment): 2.
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=5)
 
     # --- streaming ---------------------------------------------------------
     # An SSE comment is sent this often while the model is thinking, so the

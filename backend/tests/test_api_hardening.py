@@ -342,6 +342,24 @@ def test_rate_limit_returns_429_with_retry_after(api, monkeypatch):
     assert api.client.get("/health").status_code == 200  # not limited
 
 
+@pytest.mark.parametrize(
+    ("hops", "forwarded_for", "expected"),
+    [
+        (0, "1.1.1.1", "testclient"),  # header ignored unless proxies are declared
+        (1, "9.9.9.9, 1.1.1.1", "1.1.1.1"),  # behind an ALB: the entry it appended
+        (2, "9.9.9.9, 1.1.1.1, 2.2.2.2", "1.1.1.1"),  # CloudFront then ALB; 9.9.9.9 was spoofed
+        (2, "1.1.1.1", "testclient"),  # fewer entries than proxies: not trustworthy, use the peer
+        (2, None, "testclient"),
+    ],
+)
+def test_client_key_reads_only_trusted_forwarded_for_entries(monkeypatch, hops, forwarded_for, expected):
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", str(hops))
+    headers = {"x-forwarded-for": forwarded_for} if forwarded_for else {}
+    request = SimpleNamespace(headers=headers, client=SimpleNamespace(host="testclient"))
+
+    assert main._client_key(request, main.get_settings()) == expected
+
+
 def test_request_id_is_echoed_or_generated(api):
     echoed = api.client.get("/health", headers={"X-Request-ID": "abc-123"})
     replaced = api.client.get("/health", headers={"X-Request-ID": "bad id\nwith newline"})
