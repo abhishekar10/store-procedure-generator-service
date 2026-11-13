@@ -40,6 +40,12 @@ to get evaluated closely.
 
 ## Suggested high-level flow
 
+> **Superseded in part (Phase 3).** The `app.db: history` node below no
+> longer exists: the service is stateless, the caller sends the conversation
+> with each request, and the demo UI keeps history in localStorage. The UI
+> shows the script with its section markers rather than tabbed sections.
+> See [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for the current flow.
+
 ```mermaid
 flowchart LR
     U[User plain-English prompt] --> B[FastAPI /generate]

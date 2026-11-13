@@ -24,6 +24,7 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "httpx==0.28.1",      # required by starlette's TestClient
+    "jsonschema==4.26.0", # tests/test_contract.py validates responses against docs/openapi.json
     "ruff==0.15.1",
 ]
 

@@ -17,16 +17,15 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
-from typing import Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import adapters
+from app.api_models import ErrorResponse, GeneratedResponse, GenerateRequest, RejectedResponse, SchemaResponse
 from app.config import Settings, get_settings
 from app.errors import ServiceError, error_body, to_service_error
 from app.middleware import RequestContextMiddleware
@@ -60,6 +59,13 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="RAG Stored Procedure Generator",
+    version="1.0.0",
+    summary="Turns a plain-English request into a PL/pgSQL stored procedure, grounded in a reference schema.",
+    description=(
+        "Stateless: send the conversation so far with every request and keep the results yourself. "
+        "Authentication is not done here -- the service is meant to sit behind an API gateway or "
+        "load balancer that authenticates callers. See docs/ARCHITECTURE.md."
+    ),
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
@@ -142,76 +148,6 @@ def ready(response: Response):
     return {"status": "ready" if ok else "not_ready", "checks": checks}
 
 
-class Message(BaseModel):
-    """One turn of the conversation so far, as the caller keeps it. Only what
-    the model needs: the user's request, or what the service answered."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    role: Literal["user", "assistant"]
-    kind: Literal["generation", "rejected"] | None = Field(
-        default=None,
-        description="Assistant messages only: a script (`generation`, the default) or a `rejected` request.",
-    )
-    content: str | None = Field(
-        default=None,
-        description="User messages: the request (at most MAX_PROMPT_CHARS). Rejected assistant messages: the reason.",
-    )
-    full_script: str | None = Field(default=None, description="Assistant `generation` messages: the script returned.")
-
-    @model_validator(mode="after")
-    def _shape_matches_role(self) -> "Message":
-        if self.role == "user":
-            if self.kind is not None or self.full_script is not None:
-                raise ValueError("a user message has only content")
-            if not (self.content or "").strip():
-                raise ValueError("content must not be blank")
-            limit = get_settings().max_prompt_chars
-            if len(self.content) > limit:
-                raise ValueError(f"content must be at most {limit} characters")
-            return self
-        self.kind = self.kind or "generation"
-        if self.kind == "generation" and not (self.full_script or "").strip():
-            raise ValueError("an assistant generation needs full_script")
-        if self.kind == "rejected" and not (self.content or "").strip():
-            raise ValueError("an assistant rejection needs content (the reason)")
-        return self
-
-
-_EXAMPLE_FIRST_TURN = {"messages": [{"role": "user", "content": "Process payroll for a given pay period"}]}
-_EXAMPLE_FOLLOW_UP = {
-    "messages": [
-        {"role": "user", "content": "Process payroll for a given pay period"},
-        {"role": "assistant", "kind": "generation", "full_script": "-- SECTION: PRE_VALIDATION\n..."},
-        {"role": "user", "content": "Also skip employees who are on leave"},
-    ]
-}
-
-
-class GenerateRequest(BaseModel):
-    """The conversation so far, ending with the new request. To regenerate
-    an answer, resend the conversation without its last assistant message."""
-
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [_EXAMPLE_FIRST_TURN, _EXAMPLE_FOLLOW_UP]})
-
-    messages: list[Message] = Field(min_length=1)
-
-    @field_validator("messages")
-    @classmethod
-    def _ends_with_a_request(cls, messages: list[Message]) -> list[Message]:
-        if messages[-1].role != "user":
-            raise ValueError("the last message must be the user's request")
-        return messages
-
-    @property
-    def prompt(self) -> str:
-        return self.messages[-1].content
-
-    @property
-    def prior_messages(self) -> list[dict]:
-        return [message.model_dump(exclude_none=True) for message in self.messages[:-1]]
-
-
 _limiter: TokenBucketLimiter | None = None
 _limiter_config: tuple | None = None
 _limiter_lock = threading.Lock()
@@ -281,6 +217,29 @@ def _sse(event: str, data: dict) -> str:
 
 v1 = APIRouter(prefix="/v1")
 
+_ERRORS = {
+    413: {"model": ErrorResponse, "description": "Body over MAX_REQUEST_BYTES (`request_too_large`)."},
+    422: {"model": ErrorResponse, "description": "Body failed validation (`invalid_request`); `details` says where."},
+    429: {"model": ErrorResponse, "description": "Rate limited (`rate_limited`); see the Retry-After header."},
+    500: {"model": ErrorResponse, "description": "Unexpected failure (`internal_error`)."},
+    503: {
+        "model": ErrorResponse,
+        "description": "`not_configured`, `index_unavailable`, `upstream_rate_limited`, `upstream_timeout` or "
+        "`upstream_unavailable`. Safe to retry later.",
+    },
+}
+
+_SSE_EXAMPLE = (
+    'event: status\ndata: {"stage": "checking_request"}\n\n'
+    'event: status\ndata: {"stage": "retrieving_context"}\n\n'
+    'event: status\ndata: {"stage": "drafting_script"}\n\n'
+    ": keepalive\n\n"
+    'event: chunk\ndata: {"text": "-- SECTION: PRE_VALIDATION\\nCREATE OR REPLACE PROCEDURE ..."}\n\n'
+    'event: status\ndata: {"stage": "validating_script"}\n\n'
+    'event: done\ndata: {"full_script": "...", "sections": {...}, "retrieved_context": {...}, '
+    '"sql_valid": true, "sql_issues": []}\n\n'
+)
+
 
 def _script_result(result: dict) -> dict:
     return {
@@ -297,6 +256,8 @@ def _script_result(result: dict) -> dict:
     tags=["Generation"],
     summary="Generate a stored procedure from the conversation so far (non-streaming)",
     dependencies=[Depends(enforce_rate_limit)],
+    response_model=GeneratedResponse | RejectedResponse,
+    responses=_ERRORS,
 )
 def generate(request: GenerateRequest):
     """Runs synchronously on FastAPI's threadpool, so the model call does not
@@ -392,6 +353,21 @@ async def _run_with_heartbeat(make_events: Callable[[], Iterator[str]], interval
     tags=["Generation"],
     summary="Generate or revise a stored procedure, streamed as Server-Sent Events",
     dependencies=[Depends(enforce_rate_limit)],
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": (
+                "Server-Sent Events, in order: `status` `{stage}` at each pipeline step "
+                "(checking_request, retrieving_context, drafting_script, validating_script); `chunk` `{text}` "
+                "as the script arrives; then exactly one of `done` (the GeneratedResponse fields except "
+                "`rejected` and `prompt`), `rejected` `{reason}` (right after checking_request), or `error` "
+                "(the ErrorInfo fields). Lines starting with `:` are keepalive comments sent while the model "
+                "thinks. Validation, size and rate-limit failures are ordinary JSON errors before the stream starts."
+            ),
+            "content": {"text/event-stream": {"schema": {"type": "string"}, "example": _SSE_EXAMPLE}},
+        },
+        **{status: spec for status, spec in _ERRORS.items() if status != 503},
+    },
 )
 def generate_stream(request: GenerateRequest):
     def event_stream() -> Iterator[str]:
@@ -434,7 +410,12 @@ def generate_stream(request: GenerateRequest):
     )
 
 
-@v1.get("/schema", tags=["Reference Schema"], summary="List reference schema tables and columns")
+@v1.get(
+    "/schema",
+    tags=["Reference Schema"],
+    summary="List reference schema tables and columns",
+    response_model=SchemaResponse,
+)
 def get_schema():
     return {
         "tables": [

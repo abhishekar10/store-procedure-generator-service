@@ -1,0 +1,661 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RAG Stored Procedure Generator",
+    "summary": "Turns a plain-English request into a PL/pgSQL stored procedure, grounded in a reference schema.",
+    "description": "Stateless: send the conversation so far with every request and keep the results yourself. Authentication is not done here -- the service is meant to sit behind an API gateway or load balancer that authenticates callers. See docs/ARCHITECTURE.md.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Ops"
+        ],
+        "summary": "Liveness: the process is up and serving",
+        "description": "Deliberately dependency-free. It answers 'should this task be\nrestarted', so it must not fail because an upstream is down.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": [
+          "Ops"
+        ],
+        "summary": "Readiness: able to serve real traffic",
+        "description": "Readiness means config is present and the corpora are loaded.\n\nThis is what the load balancer polls, so it checks only local state --\nno Gemini call, no cost, no dependency on an upstream being reachable.",
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/generate": {
+      "post": {
+        "tags": [
+          "Generation"
+        ],
+        "summary": "Generate a stored procedure from the conversation so far (non-streaming)",
+        "description": "Runs synchronously on FastAPI's threadpool, so the model call does not\nblock the event loop. Prefer /v1/generate/stream behind a load balancer:\nthis endpoint sends nothing until the script is done.",
+        "operationId": "generate_v1_generate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/GeneratedResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RejectedResponse"
+                    }
+                  ],
+                  "title": "Response Generate V1 Generate Post"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body over MAX_REQUEST_BYTES (`request_too_large`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Body failed validation (`invalid_request`); `details` says where.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`rate_limited`); see the Retry-After header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure (`internal_error`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured`, `index_unavailable`, `upstream_rate_limited`, `upstream_timeout` or `upstream_unavailable`. Safe to retry later.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/generate/stream": {
+      "post": {
+        "tags": [
+          "Generation"
+        ],
+        "summary": "Generate or revise a stored procedure, streamed as Server-Sent Events",
+        "operationId": "generate_stream_v1_generate_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Server-Sent Events, in order: `status` `{stage}` at each pipeline step (checking_request, retrieving_context, drafting_script, validating_script); `chunk` `{text}` as the script arrives; then exactly one of `done` (the GeneratedResponse fields except `rejected` and `prompt`), `rejected` `{reason}` (right after checking_request), or `error` (the ErrorInfo fields). Lines starting with `:` are keepalive comments sent while the model thinks. Validation, size and rate-limit failures are ordinary JSON errors before the stream starts.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "event: status\ndata: {\"stage\": \"checking_request\"}\n\nevent: status\ndata: {\"stage\": \"retrieving_context\"}\n\nevent: status\ndata: {\"stage\": \"drafting_script\"}\n\n: keepalive\n\nevent: chunk\ndata: {\"text\": \"-- SECTION: PRE_VALIDATION\\nCREATE OR REPLACE PROCEDURE ...\"}\n\nevent: status\ndata: {\"stage\": \"validating_script\"}\n\nevent: done\ndata: {\"full_script\": \"...\", \"sections\": {...}, \"retrieved_context\": {...}, \"sql_valid\": true, \"sql_issues\": []}\n\n"
+              }
+            }
+          },
+          "413": {
+            "description": "Body over MAX_REQUEST_BYTES (`request_too_large`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Body failed validation (`invalid_request`); `details` says where.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`rate_limited`); see the Retry-After header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected failure (`internal_error`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schema": {
+      "get": {
+        "tags": [
+          "Reference Schema"
+        ],
+        "summary": "List reference schema tables and columns",
+        "operationId": "get_schema_v1_schema_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchemaResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorDetail": {
+        "properties": {
+          "field": {
+            "type": "string",
+            "title": "Field",
+            "examples": [
+              "messages.0"
+            ]
+          },
+          "issue": {
+            "type": "string",
+            "title": "Issue",
+            "examples": [
+              "Value error, content must not be blank"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "field",
+          "issue"
+        ],
+        "title": "ErrorDetail"
+      },
+      "ErrorInfo": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "Stable; callers may branch on it. See README for the list.",
+            "examples": [
+              "upstream_unavailable"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Safe to show; may change.",
+            "examples": [
+              "The model is unavailable. Try again."
+            ]
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id",
+            "description": "Also in the X-Request-ID response header."
+          },
+          "details": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details",
+            "description": "Validation errors only."
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ],
+        "title": "ErrorInfo"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorInfo"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse"
+      },
+      "GenerateRequest": {
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Messages"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "title": "GenerateRequest",
+        "description": "The conversation so far, ending with the new request. To regenerate\nan answer, resend the conversation without its last assistant message.",
+        "examples": [
+          {
+            "messages": [
+              {
+                "content": "Process payroll for a given pay period",
+                "role": "user"
+              }
+            ]
+          },
+          {
+            "messages": [
+              {
+                "content": "Process payroll for a given pay period",
+                "role": "user"
+              },
+              {
+                "full_script": "-- SECTION: PRE_VALIDATION\n...",
+                "kind": "generation",
+                "role": "assistant"
+              },
+              {
+                "content": "Also skip employees who are on leave",
+                "role": "user"
+              }
+            ]
+          }
+        ]
+      },
+      "GeneratedResponse": {
+        "properties": {
+          "full_script": {
+            "type": "string",
+            "title": "Full Script",
+            "description": "One deployable script with seven `-- SECTION:` markers.",
+            "examples": [
+              "-- SECTION: PRE_VALIDATION\nCREATE OR REPLACE PROCEDURE process_payroll(p_payroll_run_id INTEGER)\nLANGUAGE plpgsql\nAS $$\n...\n-- SECTION: ROLLBACK_MANUAL\nCREATE OR REPLACE PROCEDURE rollback_process_payroll(p_payroll_run_id INTEGER) ...\n"
+            ]
+          },
+          "sections": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Sections",
+            "description": "The script split at its markers: pre_validation, temp_tables, backup, main_script, post_validation, rollback_auto, rollback_manual."
+          },
+          "retrieved_context": {
+            "$ref": "#/components/schemas/RetrievedContext"
+          },
+          "sql_valid": {
+            "type": "boolean",
+            "title": "Sql Valid",
+            "description": "Passed the best-effort structural check. Not a guarantee it runs."
+          },
+          "sql_issues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sql Issues",
+            "description": "What the structural check found; empty when sql_valid."
+          },
+          "rejected": {
+            "type": "boolean",
+            "const": false,
+            "title": "Rejected",
+            "default": false
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt",
+            "description": "The request this script answers (the last user message)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "full_script",
+          "sections",
+          "retrieved_context",
+          "sql_valid",
+          "sql_issues",
+          "prompt"
+        ],
+        "title": "GeneratedResponse"
+      },
+      "Message": {
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "generation",
+                  "rejected"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind",
+            "description": "Assistant messages only: a script (`generation`, the default) or a `rejected` request."
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content",
+            "description": "User messages: the request (at most MAX_PROMPT_CHARS). Rejected assistant messages: the reason."
+          },
+          "full_script": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Full Script",
+            "description": "Assistant `generation` messages: the script returned."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "title": "Message",
+        "description": "One turn of the conversation so far, as the caller keeps it. Only what\nthe model needs: the user's request, or what the service answered."
+      },
+      "RejectedResponse": {
+        "properties": {
+          "rejected": {
+            "type": "boolean",
+            "const": true,
+            "title": "Rejected",
+            "default": true
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "examples": [
+              "The request is general chit-chat, not a database operation."
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "RejectedResponse"
+      },
+      "RetrievedChunk": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id",
+            "examples": [
+              "schema::payroll_runs"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata",
+            "examples": [
+              {
+                "table_name": "payroll_runs"
+              }
+            ]
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score",
+            "description": "Cosine distance for schema chunks (lower is closer); null for pattern chunks, which are looked up, not searched.",
+            "examples": [
+              0.31
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "text",
+          "metadata",
+          "score"
+        ],
+        "title": "RetrievedChunk"
+      },
+      "RetrievedContext": {
+        "properties": {
+          "schema_chunks": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievedChunk"
+            },
+            "type": "array",
+            "title": "Schema Chunks",
+            "description": "Tables retrieved for this request, nearest first."
+          },
+          "pattern_chunks": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievedChunk"
+            },
+            "type": "array",
+            "title": "Pattern Chunks",
+            "description": "One house-style pattern per section, in section order."
+          }
+        },
+        "type": "object",
+        "required": [
+          "schema_chunks",
+          "pattern_chunks"
+        ],
+        "title": "RetrievedContext"
+      },
+      "SchemaColumn": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "primary_key": {
+            "type": "boolean",
+            "title": "Primary Key"
+          },
+          "not_null": {
+            "type": "boolean",
+            "title": "Not Null"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "primary_key",
+          "not_null",
+          "description"
+        ],
+        "title": "SchemaColumn"
+      },
+      "SchemaResponse": {
+        "properties": {
+          "tables": {
+            "items": {
+              "$ref": "#/components/schemas/SchemaTable"
+            },
+            "type": "array",
+            "title": "Tables"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tables"
+        ],
+        "title": "SchemaResponse"
+      },
+      "SchemaTable": {
+        "properties": {
+          "table_name": {
+            "type": "string",
+            "title": "Table Name"
+          },
+          "purpose": {
+            "type": "string",
+            "title": "Purpose"
+          },
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/SchemaColumn"
+            },
+            "type": "array",
+            "title": "Columns"
+          }
+        },
+        "type": "object",
+        "required": [
+          "table_name",
+          "purpose",
+          "columns"
+        ],
+        "title": "SchemaTable"
+      }
+    }
+  }
+}

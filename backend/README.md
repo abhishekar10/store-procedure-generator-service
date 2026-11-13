@@ -120,6 +120,15 @@ task can serve any request. The demo UI keeps its history in the browser.
 
 `/health` and `/ready` are probes, not API, so they are not versioned.
 
+The contract is checked in as [`docs/openapi.json`](../docs/openapi.json),
+with request and response examples, and `tests/test_contract.py` pins the
+service to it: the spec the app generates must match the file, and real
+responses must validate against it with exactly the declared fields. After
+an intended API change, regenerate it with `python -m app.openapi_export`
+and commit the diff. How the service fits into a larger system -- gateway,
+auth, caller-owned state, adapters -- is in
+[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
+
 ### Request body
 
 `messages` is the conversation so far, oldest first, ending with the new
