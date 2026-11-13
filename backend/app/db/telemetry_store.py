@@ -8,9 +8,9 @@ working, and how well" without leaving the codebase."""
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from app import config
+from app.config import get_settings
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS telemetry_events (
@@ -36,8 +36,9 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
 
 
 def _connect() -> sqlite3.Connection:
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(config.APP_DB_PATH)
+    settings = get_settings()
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(settings.app_db_path)
     connection.executescript(_SCHEMA)
     return connection
 
@@ -85,7 +86,7 @@ def log_event(
                 None if sql_valid is None else int(sql_valid),
                 json.dumps(sql_issues) if sql_issues is not None else None,
                 error_message,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
             ),
         )
     connection.close()
@@ -101,7 +102,9 @@ def get_metrics_summary() -> dict:
 
     total = connection.execute("SELECT COUNT(*) FROM telemetry_events").fetchone()[0]
     accepted = connection.execute("SELECT COUNT(*) FROM telemetry_events WHERE accepted = 1").fetchone()[0]
-    rejected = connection.execute("SELECT COUNT(*) FROM telemetry_events WHERE accepted = 0 AND error_message IS NULL").fetchone()[0]
+    rejected = connection.execute(
+        "SELECT COUNT(*) FROM telemetry_events WHERE accepted = 0 AND error_message IS NULL"
+    ).fetchone()[0]
     errored = connection.execute("SELECT COUNT(*) FROM telemetry_events WHERE error_message IS NOT NULL").fetchone()[0]
     regenerated = connection.execute("SELECT COUNT(*) FROM telemetry_events WHERE is_regenerate = 1").fetchone()[0]
 
@@ -131,7 +134,10 @@ def get_metrics_summary() -> dict:
         "avg_retrieval_latency_ms": _avg(connection, "retrieval_latency_ms"),
         "avg_generation_latency_ms": _avg(connection, "generation_latency_ms"),
         "avg_total_latency_ms": _avg(connection, "total_latency_ms"),
-        "most_retrieved_tables": [list(item) for item in sorted(table_counts.items(), key=lambda kv: kv[1], reverse=True)[:10]],
+        "most_retrieved_tables": [
+            list(item)
+            for item in sorted(table_counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        ],
     }
     connection.close()
     return summary

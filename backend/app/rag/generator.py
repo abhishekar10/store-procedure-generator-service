@@ -6,7 +6,7 @@ from collections.abc import Iterator
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from app import config
+from app.config import get_settings
 from app.rag.retriever import RetrievedChunk, retrieve_context
 from app.rag.section_parser import parse_sections
 from app.rag.validator import validate_script
@@ -80,7 +80,11 @@ def _extract_text(content: str | list) -> str:
     normalize both into a single string."""
     if isinstance(content, str):
         return content
-    return "".join(block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text")
+    return "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
 
 
 def _format_schema_context(chunks: list[RetrievedChunk]) -> str:
@@ -103,7 +107,11 @@ def _format_transcript(prior_messages: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def build_prompt(user_prompt: str, context: dict[str, list[RetrievedChunk]], prior_messages: list[dict] | None = None) -> str:
+def build_prompt(
+    user_prompt: str,
+    context: dict[str, list[RetrievedChunk]],
+    prior_messages: list[dict] | None = None,
+) -> str:
     prior_messages = prior_messages or []
 
     parts = [
@@ -122,7 +130,12 @@ def build_prompt(user_prompt: str, context: dict[str, list[RetrievedChunk]], pri
 
 
 def _build_llm() -> ChatGoogleGenerativeAI:
-    return ChatGoogleGenerativeAI(model=config.GENERATION_MODEL, google_api_key=config.GEMINI_API_KEY, temperature=0.2)
+    settings = get_settings()
+    return ChatGoogleGenerativeAI(
+        model=settings.generation_model,
+        google_api_key=settings.require_gemini_api_key(),
+        temperature=0.2,
+    )
 
 
 def _format_classifier_conversation_block(prior_messages: list[dict] | None) -> str:
@@ -141,7 +154,12 @@ def classify_request(user_prompt: str, prior_messages: list[dict] | None = None)
     so a short follow-up ("make it handle nulls too") is judged in the
     context of an already-established stored-procedure conversation, not in
     isolation."""
-    llm = ChatGoogleGenerativeAI(model=config.GENERATION_MODEL, google_api_key=config.GEMINI_API_KEY, temperature=0)
+    settings = get_settings()
+    llm = ChatGoogleGenerativeAI(
+        model=settings.generation_model,
+        google_api_key=settings.require_gemini_api_key(),
+        temperature=0,
+    )
     conversation_block = _format_classifier_conversation_block(prior_messages)
     prompt = CLASSIFIER_PROMPT.format(conversation_block=conversation_block, user_prompt=user_prompt)
     response_text = _extract_text(llm.invoke(prompt).content)
@@ -155,7 +173,7 @@ def classify_request(user_prompt: str, prior_messages: list[dict] | None = None)
 
 
 def _retrieve_and_build_prompt(
-    user_prompt: str, prior_messages: list[dict] | None, top_k: int
+    user_prompt: str, prior_messages: list[dict] | None, top_k: int | None
 ) -> tuple[str, dict[str, list[RetrievedChunk]]]:
     prior_messages = prior_messages or []
     prior_user_texts = [m["content"] for m in prior_messages if m["role"] == "user"]
@@ -178,7 +196,9 @@ def _finalize(user_prompt: str, full_script: str, context: dict[str, list[Retrie
     }
 
 
-def generate_stored_procedure(user_prompt: str, prior_messages: list[dict] | None = None, top_k: int = 5) -> dict:
+def generate_stored_procedure(
+    user_prompt: str, prior_messages: list[dict] | None = None, top_k: int | None = None
+) -> dict:
     is_valid, reason = classify_request(user_prompt, prior_messages)
     if not is_valid:
         raise RequestRejected(reason)
@@ -188,7 +208,9 @@ def generate_stored_procedure(user_prompt: str, prior_messages: list[dict] | Non
     return _finalize(user_prompt, full_script, context)
 
 
-def stream_stored_procedure(user_prompt: str, prior_messages: list[dict] | None = None, top_k: int = 5) -> Iterator[dict]:
+def stream_stored_procedure(
+    user_prompt: str, prior_messages: list[dict] | None = None, top_k: int | None = None
+) -> Iterator[dict]:
     """Yields {"type": "status", "stage": ...} at each real pipeline
     transition, {"type": "chunk", "text": ...} as text arrives, and finally a
     single {"type": "done", ...} with the full finalized result -- or a

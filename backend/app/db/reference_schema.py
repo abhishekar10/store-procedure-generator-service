@@ -4,12 +4,13 @@ used by the schema explorer endpoint."""
 import json
 import sqlite3
 
-from app import config
+from app.config import get_settings
 
 
 def list_tables() -> list[dict]:
-    table_metadata = json.loads(config.SCHEMA_METADATA_PATH.read_text())["tables"]
-    connection = sqlite3.connect(config.REFERENCE_DB_PATH)
+    settings = get_settings()
+    table_metadata = json.loads(settings.schema_metadata_path.read_text())["tables"]
+    connection = sqlite3.connect(settings.reference_db_path)
 
     tables = []
     for table_name, table_meta in table_metadata.items():

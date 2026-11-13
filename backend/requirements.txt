@@ -1,5 +1,0 @@
-# Additions on top of the shared rag/requirements.txt (chromadb,
-# langchain-google-genai, python-dotenv, etc. are already installed there).
-fastapi
-uvicorn[standard]
-pytest

@@ -11,16 +11,16 @@ import sqlite3
 import chromadb
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-from app import config
+from app.config import PATTERN_CATEGORIES, get_settings
 
 
 def _load_table_metadata() -> dict:
-    return json.loads(config.SCHEMA_METADATA_PATH.read_text())["tables"]
+    return json.loads(get_settings().schema_metadata_path.read_text())["tables"]
 
 
 def _build_schema_chunks() -> tuple[list[str], list[str], list[dict]]:
     table_metadata = _load_table_metadata()
-    connection = sqlite3.connect(config.REFERENCE_DB_PATH)
+    connection = sqlite3.connect(get_settings().reference_db_path)
 
     ids, documents, metadatas = [], [], []
     for table_name, table_meta in table_metadata.items():
@@ -58,8 +58,8 @@ def _build_schema_chunks() -> tuple[list[str], list[str], list[dict]]:
 
 def _build_pattern_chunks() -> tuple[list[str], list[str], list[dict]]:
     ids, documents, metadatas = [], [], []
-    for category in config.PATTERN_CATEGORIES:
-        path = config.SP_TEMPLATES_DIR / f"{category}.sql"
+    for category in PATTERN_CATEGORIES:
+        path = get_settings().sp_templates_dir / f"{category}.sql"
         ids.append(f"pattern::{category}")
         documents.append(path.read_text())
         metadatas.append({"category": category})
@@ -74,13 +74,17 @@ def _replace_collection(client: chromadb.ClientAPI, name: str) -> chromadb.Colle
 
 
 def run_ingest() -> None:
-    embeddings = GoogleGenerativeAIEmbeddings(model=config.EMBEDDING_MODEL, google_api_key=config.GEMINI_API_KEY)
-    client = chromadb.PersistentClient(path=str(config.VECTOR_STORE_DIR))
+    settings = get_settings()
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model=settings.embedding_model,
+        google_api_key=settings.require_gemini_api_key(),
+    )
+    client = chromadb.PersistentClient(path=str(settings.vector_store_dir))
 
     schema_ids, schema_docs, schema_metadatas = _build_schema_chunks()
     pattern_ids, pattern_docs, pattern_metadatas = _build_pattern_chunks()
 
-    schema_collection = _replace_collection(client, config.SCHEMA_COLLECTION)
+    schema_collection = _replace_collection(client, settings.schema_collection)
     schema_collection.add(
         ids=schema_ids,
         documents=schema_docs,
@@ -88,7 +92,7 @@ def run_ingest() -> None:
         embeddings=embeddings.embed_documents(schema_docs, task_type="retrieval_document"),
     )
 
-    pattern_collection = _replace_collection(client, config.PATTERN_COLLECTION)
+    pattern_collection = _replace_collection(client, settings.pattern_collection)
     pattern_collection.add(
         ids=pattern_ids,
         documents=pattern_docs,
@@ -96,8 +100,8 @@ def run_ingest() -> None:
         embeddings=embeddings.embed_documents(pattern_docs, task_type="retrieval_document"),
     )
 
-    print(f"Embedded {schema_collection.count()} schema chunks into '{config.SCHEMA_COLLECTION}'")
-    print(f"Embedded {pattern_collection.count()} pattern chunks into '{config.PATTERN_COLLECTION}'")
+    print(f"Embedded {schema_collection.count()} schema chunks into '{settings.schema_collection}'")
+    print(f"Embedded {pattern_collection.count()} pattern chunks into '{settings.pattern_collection}'")
 
 
 if __name__ == "__main__":

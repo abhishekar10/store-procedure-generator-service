@@ -4,9 +4,9 @@
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from app import config
+from app.config import get_settings
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -35,15 +35,16 @@ _TITLE_MAX_LEN = 60
 
 
 def _connect() -> sqlite3.Connection:
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(config.APP_DB_PATH)
+    settings = get_settings()
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(settings.app_db_path)
     connection.execute("PRAGMA foreign_keys = ON;")
     connection.executescript(_SCHEMA)
     return connection
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def create_conversation(first_prompt: str) -> str:

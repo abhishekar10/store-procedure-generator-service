@@ -1,0 +1,61 @@
+[project]
+name = "sp-generator-service"
+version = "0.1.0"
+description = "RAG service that generates PL/pgSQL stored procedures from plain-English requests"
+requires-python = ">=3.12,<3.13"
+
+# Pinned to the versions this service was built and verified against.
+#
+# This list is deliberately short. The previous shared rag/requirements.txt
+# carried 11 packages for four different exercises; 8 of them are unused here
+# (faiss-cpu, sentence-transformers, pymupdf, pypdf, ipykernel, langchain,
+# langchain-community, langchain-core). Dropping sentence-transformers in
+# particular keeps torch (~1.1 GB) out of the container image.
+dependencies = [
+    "chromadb==1.5.9",
+    "langchain-google-genai==4.3.2",
+    "fastapi==0.140.13",
+    "uvicorn[standard]==0.51.0",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.13.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "httpx==0.28.1",      # required by starlette's TestClient
+    "ruff==0.15.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+# Default `pytest` run collects only the fast, offline unit tests in tests/.
+# Evals (evals/) call live Gemini APIs and cost real time and tokens -- run
+# them explicitly with `pytest evals/`.
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "eval: calls a live Gemini API; not part of the default fast test run",
+]
+
+[tool.ruff]
+target-version = "py312"
+# 120 rather than the default 88: this codebase was written at roughly that
+# width, and reflowing it wholesale would bury the real changes in noise.
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "B008",  # FastAPI's Depends()/Query() defaults are called in signatures by design
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+"evals/*" = ["E501"]

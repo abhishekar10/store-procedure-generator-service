@@ -4,11 +4,12 @@ chat conversation storage."""
 import json
 import time
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.config import get_settings
 from app.db.conversation_store import (
     add_assistant_message,
     add_rejected_message,
@@ -22,7 +23,7 @@ from app.db.reference_schema import list_tables
 from app.db.telemetry_store import get_metrics_summary, log_event
 from app.rag.generator import RequestRejected, generate_stored_procedure, stream_stored_procedure
 from app.rag.ingest import run_ingest
-from app.rag.retriever import serialize_context
+from app.rag.retriever import check_collections, serialize_context
 
 app = FastAPI(
     title="RAG Stored Procedure Generator",
@@ -31,12 +32,45 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 
+# Origins come from configuration and default to none. A browser-facing
+# deployment sets CORS_ALLOW_ORIGINS explicitly; a service behind a gateway
+# needs no origins at all.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=get_settings().cors_allow_origins,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["content-type"],
 )
+
+
+@app.get("/health", tags=["Ops"], summary="Liveness: the process is up and serving")
+def health():
+    """Deliberately dependency-free. It answers 'should this task be
+    restarted', so it must not fail because an upstream is down."""
+    return {"status": "ok"}
+
+
+@app.get("/ready", tags=["Ops"], summary="Readiness: able to serve real traffic")
+def ready(response: Response):
+    """Readiness means config is present and the corpora are loaded.
+
+    This is what the load balancer polls, so it checks only local state --
+    no Gemini call, no cost, no dependency on an upstream being reachable.
+    """
+    settings = get_settings()
+    checks: dict[str, object] = {}
+
+    checks["config"] = bool(settings.gemini_api_key)
+    checks["reference_db"] = settings.reference_db_path.is_file()
+
+    collections = check_collections()
+    checks["collections"] = collections
+    checks["vector_store"] = all(count for count in collections.values())
+
+    ok = bool(checks["config"] and checks["reference_db"] and checks["vector_store"])
+    if not ok:
+        response.status_code = 503
+    return {"status": "ready" if ok else "not_ready", "checks": checks}
 
 
 class GenerateRequest(BaseModel):

@@ -19,7 +19,7 @@ def parse_sections(script: str) -> dict[str, str]:
     """Splits a script containing `-- SECTION: NAME` markers into a dict
     keyed by lowercase section name. A section with no marker present in the
     script comes back as an empty string; unrecognized markers are ignored."""
-    sections = {name: "" for name in SECTION_ORDER}
+    sections = dict.fromkeys(SECTION_ORDER, "")
 
     markers = list(_MARKER_PATTERN.finditer(script))
     for i, match in enumerate(markers):
