@@ -539,6 +539,29 @@ Original plan for this phase:
 
 ### Phase 5 — Terraform (`infra/`, ap-south-1)
 
+**Status (2026-11-14): written, validated and planned; not applied.** See `infra/README.md`.
+Decision taken with the owner: **no domain → CloudFront in front of both UI and API** (one
+HTTPS origin; CloudFront → ALB is HTTP). Two root stacks: `infra/demo` (34 resources, `make
+up`/`make down`) and `infra/account` (budget adopted via `import` + kill switch, 10 resources;
+plan: 1 import, 10 add, 1 in-place change adding the SNS topic to the 95% notification).
+Departures from the original plan below, each for a reason:
+- Task size 0.25 vCPU / 512 MB, not 0.5 / 1 GB: measured peak 143 MiB and ~27% of a core
+  during two concurrent generations. A variable.
+- `TRUST_FORWARDED_FOR` (bool, last XFF entry) replaced by `TRUSTED_PROXY_HOPS` (int): behind
+  CloudFront + ALB the client is the second-to-last entry, so the old setting would have
+  rate-limited per CloudFront edge rather than per client. Set to 2 in the task.
+- The UI is built with `VITE_API_BASE_URL=""` (same origin); `api.js` now uses `??` so an
+  empty value means same-origin instead of falling back to localhost. Verified in the bundle.
+- ALB idle timeout 300s kept; CloudFront origin read timeout 60s (max without a quota
+  increase) now bounds non-streaming `/v1/generate`. The stream heartbeats every 15s.
+- Costs from the Price List API (not memory): ≈ $0.052/h ≈ $1.25/day while up.
+Verified offline: `terraform validate` both stacks, `terraform plan` both stacks against the
+account, the kill-switch Lambda's logic (3 tests with a fake boto3), the scripts parse. **Not
+yet verified: anything that needs `apply`** — the stack coming up, the image running on
+Fargate, SSE through CloudFront, the kill switch firing.
+
+Original plan:
+
 Modules: `network`, `ecr`, `service`, `frontend`.
 
 ECS Fargate (0.5 vCPU / 1 GB), ECR, ALB with health check on `/ready`, Secrets Manager

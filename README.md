@@ -47,6 +47,7 @@ A generation takes about 15 seconds.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How it fits into a larger system: gateway and auth, caller-owned state, adapters, request flow |
 | [`docs/openapi.json`](docs/openapi.json) | The `/v1` contract, checked in and pinned by a test |
 | [`docs/sample-output/`](docs/sample-output/) | An example generation |
+| [`infra/`](infra/README.md) | Terraform for AWS and `make up` / `make down` (written, not yet applied) |
 | [`MIGRATION_STATUS.md`](MIGRATION_STATUS.md) | Working log: what is done, measurements, decisions, what is next |
 | `planning/` | Original design notes, partly superseded -- not the current spec |
 
@@ -81,6 +82,10 @@ virtualenv is in [`backend/README.md`](backend/README.md).
 Built: the service, its hardening, the stateless `/v1` API, the adapters,
 the checked-in contract, the container images and local compose.
 
-Planned, not built: Terraform for AWS (ECS Fargate behind an ALB, the UI on
-S3 + CloudFront) and CI/CD on GitHub Actions. See
+Written and planned, **not yet applied**: Terraform for AWS in
+[`infra/`](infra/README.md) -- ECS Fargate behind an ALB, the UI and API
+under one CloudFront HTTPS address, and a budget kill switch -- driven by
+`make up` / `make down`, with a cost estimate.
+
+Planned, not built: CI/CD on GitHub Actions. See
 [`MIGRATION_STATUS.md`](MIGRATION_STATUS.md).

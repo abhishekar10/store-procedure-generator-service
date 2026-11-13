@@ -9,3 +9,13 @@ __pycache__/
 # which did not travel with the subtree split).
 .env
 .venv/
+
+# Terraform: local state holds resource IDs (and the origin-verify header);
+# tfvars hold the owner's email. Lock files ARE committed.
+infra/**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+infra/**/terraform.tfvars
+infra/**/.build/

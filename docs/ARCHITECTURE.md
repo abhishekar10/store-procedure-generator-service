@@ -6,9 +6,10 @@ built to be one component of a larger system: it has a versioned contract
 (`/v1`, [`openapi.json`](openapi.json)), keeps no state, and depends on
 three swappable interfaces rather than on particular vendors.
 
-What exists today runs locally with `docker compose`. The AWS deployment
-described below (ALB, ECS Fargate, CloudFront) is **planned** (Phase 5 in
-[`MIGRATION_STATUS.md`](../MIGRATION_STATUS.md)), not built.
+What runs today runs locally with `docker compose`. The AWS deployment
+described below (CloudFront, an ALB, ECS Fargate) is written as Terraform in
+[`infra/`](../infra/README.md) and has been planned against the account, but
+**not yet applied**.
 
 ## Where it sits
 
@@ -33,14 +34,14 @@ flowchart LR
 **The gateway owns authentication and authorisation.** The service has no
 auth code by design: it trusts any request that reaches it, so it must only
 be reachable through something that has already decided the caller may use
-it. In the planned AWS deployment that is an ALB; authentication there would
-be the ALB's OIDC/Cognito integration or an identity-aware proxy in front of
-it (neither is built). An ALB rather than API Gateway because API Gateway's
+it. In the AWS deployment that is CloudFront and then an ALB, which admits
+only CloudFront; authentication there would be the ALB's OIDC/Cognito
+integration or an identity-aware proxy in front of it (neither is built). An ALB rather than API Gateway because API Gateway's
 default 29-second integration timeout is below the service's 200-second
 generation timeout. Per-caller quotas also belong at the gateway or WAF; the
 service's own token bucket (`app/ratelimit.py`) is a per-task fallback, keyed
-on client IP, and honours `X-Forwarded-For` only when `TRUST_FORWARDED_FOR`
-says the proxy in front is trusted.
+on client IP, and reads it from `X-Forwarded-For` only as far back as
+`TRUSTED_PROXY_HOPS` says there are trusted proxies in front.
 
 ## The caller owns the conversation
 
