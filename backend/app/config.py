@@ -24,6 +24,7 @@ PATTERN_CATEGORIES = [
     "pre_validation",
     "temp_tables",
     "backup",
+    "main_script",
     "post_validation",
     "rollback_auto",
     "rollback_manual",

@@ -53,7 +53,7 @@ def retrieve_schema_chunks(prompt: str, top_k: int | None = None) -> list[Retrie
 
 def retrieve_pattern_chunks() -> list[RetrievedChunk]:
     """Returns exactly one chunk per category, in a fixed order -- every
-    generation gets grounding for all six sections regardless of prompt
+    generation gets grounding for all seven sections regardless of prompt
     wording, so this is a direct lookup rather than a similarity search."""
     collection = _get_client().get_collection(get_settings().pattern_collection)
 

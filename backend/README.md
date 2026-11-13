@@ -209,10 +209,22 @@ generation fails partway through.
 ## Validation
 
 Every generation gets a best-effort structural check (`app/rag/validator.py`):
-balanced parentheses, balanced `$$` dollar-quoted blocks, and all seven
-sections present and non-empty. It is not a real SQL parser -- it catches
-the kinds of malformed output an LLM occasionally produces, not genuine
-PL/pgSQL correctness.
+balanced parentheses, balanced `$$` dollar-quoted blocks, all seven
+sections present and non-empty, and the main procedure in the right place:
+`MAIN_SCRIPT` must declare a procedure, no section other than `MAIN_SCRIPT`
+and `ROLLBACK_MANUAL` may declare one, and `MAIN_SCRIPT` must not be under a
+quarter the size of the largest other section. It is not a real SQL parser --
+it catches the kinds of malformed output an LLM occasionally produces, not
+genuine PL/pgSQL correctness.
+
+Section contract: `MAIN_SCRIPT` holds the one `CREATE OR REPLACE PROCEDURE`
+for the request, ending in its exception handler; `ROLLBACK_AUTO` restates
+only that `EXCEPTION WHEN OTHERS` handler; `ROLLBACK_MANUAL` is a separate
+`rollback_*` procedure that restores from the backup. The pattern templates
+in `app/sp_templates/` follow the same contract, and
+`tests/test_pattern_templates.py` enforces it -- they are retrieved into
+every prompt as house style, so a template that breaks the contract teaches
+the model to break it.
 
 ## Telemetry & metrics
 

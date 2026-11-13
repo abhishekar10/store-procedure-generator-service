@@ -6,7 +6,7 @@ built and verified, the measurements that constrain the remaining work, and what
 next. Everything here was verified by running it — nothing is aspirational. Where a
 claim is a measurement, the number is given.
 
-Last updated after Phase 1. Repo: `github.com/abhishekar10/store-procedure-generator-service`
+Last updated after Phase 1b. Repo: `github.com/abhishekar10/store-procedure-generator-service`
 
 ---
 
@@ -62,8 +62,8 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 ```bash
 cd backend
 
-.venv/bin/python -m pytest -q          # 20 offline tests, ~0.03s, no API key needed
-.venv/bin/python -m pytest evals/ -q   # 15 live-API evals, ~95s, costs real tokens
+.venv/bin/python -m pytest -q          # 32 offline tests, ~0.05s, no API key needed
+.venv/bin/python -m pytest evals/ -q   # 23 live-API evals, ~3m40s, costs real tokens
 .venv/bin/ruff check .                 # lint
 .venv/bin/ruff check . --fix
 
@@ -146,7 +146,48 @@ env var — this matters for the CloudFront deploy.
 
 `docker compose up` works with only `GEMINI_API_KEY` set.
 
-### Verified end to end
+### Phase 1b — generation quality (complete)
+
+**Root cause of the section-marker defect (§4.2) was the pattern corpus, not just the
+prompt.** `sp_templates/rollback_auto.sql` was itself a complete
+`CREATE OR REPLACE PROCEDURE` wrapper, there was no `main_script` pattern at all, and
+`SYSTEM_PROMPT` rule 2 tells the model to follow each section's pattern. The model was
+doing what it was told.
+
+- New `sp_templates/main_script.sql` holds the procedure wrapper. `rollback_auto.sql` is
+  now only the `EXCEPTION WHEN OTHERS` handler. `PATTERN_CATEGORIES` now equals
+  `SECTION_ORDER` (7 categories; was 6, missing `main_script`).
+- `SYSTEM_PROMPT` gives every section an explicit content contract and a short worked
+  example showing all seven markers.
+- `validator.py` adds three checks: `MAIN_SCRIPT` must declare a procedure; no section
+  other than `MAIN_SCRIPT` and `ROLLBACK_MANUAL` may declare one (`ROLLBACK_MANUAL` is a
+  separate `rollback_*` procedure by design); `MAIN_SCRIPT` under 25% of the largest
+  other section is flagged (observed failure was 2–6%).
+- `tests/test_pattern_templates.py` pins the corpus to the same contract, so a template
+  cannot reintroduce the defect.
+- `evals/test_generation_shape_eval.py`: full live pipeline over the 4 golden prompts,
+  run concurrently (~3 min instead of ~11).
+
+**Re-baseline** (4 golden prompts, run concurrently): all `sql_valid: true` with no
+issues; procedure in `MAIN_SCRIPT` every time; `ROLLBACK_AUTO` 126–157 chars of handler
+(was 4.3–5.1 KB of procedure). Section sizes in chars:
+
+| Prompt | main_script | largest other | rollback_auto | latency |
+|---|---|---|---|---|
+| process_payroll | 940 | 1330 (temp_tables) | 136 | 61s |
+| onboard_employee | 3960 | 669 (rollback_manual) | 126 | 119s |
+| approve_timesheet | 5178 | 1856 (temp_tables) | 138 | 144s |
+| terminate_employee | 3016 | 1569 (backup) | 157 | 96s |
+
+`process_payroll` reproduces the `main_script.sql` pattern nearly verbatim — every
+pattern is written around that same payroll example. Not a defect, but worth knowing.
+
+**The Docker image bakes the corpus in, so it must be rebuilt** to pick up the new
+patterns. The local `data/vector_store/` has been re-ingested.
+
+Verified: 32/32 offline tests, ruff clean, 23/23 live evals (3m42s).
+
+### Verified end to end (Phase 1)
 
 - 20/20 offline tests pass with `GEMINI_API_KEY` unset.
 - 15/15 live evals pass (~95s).
@@ -165,6 +206,10 @@ env var — this matters for the CloudFront deploy.
 Measured repeatedly. Telemetry from live runs: `avg_generation_latency_ms = 171,722`;
 classifier ~4.7s, retrieval ~0.6s, generation ~172s.
 
+The Phase 1b re-baseline measured 61–144s end to end across the 4 golden prompts (run
+concurrently). That is faster, but it is four samples, and every one still exceeds the
+ALB's 60s default. Plan for the 180s worst case.
+
 **This is the dominant architectural constraint.**
 
 - ALB's default idle timeout is 60s and would kill every request. **Set
@@ -176,7 +221,7 @@ classifier ~4.7s, retrieval ~0.6s, generation ~172s.
 
 Decision taken: **keep SSE and tune timeouts.** No async job API.
 
-### 4.2 The section-marker defect (not yet fixed — this is the next task)
+### 4.2 The section-marker defect (fixed in Phase 1b — see §3)
 
 Reproduced on two different prompts. The model emits the full
 `CREATE OR REPLACE PROCEDURE <main_operation>` under `-- SECTION: ROLLBACK_AUTO`
@@ -246,19 +291,6 @@ afterwards. Never leave anything running that costs money without saying so.
 
 ## 6. What to do next
 
-### Phase 1b — fix generation quality (do this first)
-
-- **`SYSTEM_PROMPT` in `app/rag/generator.py`**: give each of the 7 markers an explicit
-  content contract. State that the complete procedure body belongs in `MAIN_SCRIPT` and
-  that `ROLLBACK_AUTO` holds only the `EXCEPTION` block. Add one short worked example —
-  the current prompt describes the structure but never shows it.
-- **`app/rag/validator.py`**: flag `CREATE OR REPLACE PROCEDURE` appearing outside
-  `MAIN_SCRIPT`, and a `MAIN_SCRIPT` dwarfed by another section. Those are the two
-  signatures of the observed failure.
-- Add a generation-shape eval over the 4 golden prompts, then re-baseline.
-- Verify by re-running the golden prompts and confirming the procedure lands in
-  `MAIN_SCRIPT`.
-
 ### Phase 2 — hardening
 
 - **Validation**: prompt `min_length=1`, `max_length` ~8000, bounded `messages` list.
@@ -323,7 +355,8 @@ afterwards. Never leave anything running that costs money without saying so.
 
 ### Phase 4 — tests
 
-- The 9 pure tests in `test_section_parser.py` and `test_validator.py` survive untouched.
+- The 22 pure tests in `test_section_parser.py`, `test_validator.py` and `test_pattern_templates.py`
+  survive untouched.
 - The 10 tests in `test_conversation_store.py` and `test_telemetry_store.py` are deleted
   with the stores. `conftest.py`'s `isolated_app_db` fixture then has no users —
   replace it with LLM/embedding fakes.
@@ -380,6 +413,10 @@ Pass it with `--secret id=gemini_key,env=GEMINI_API_KEY`, never as a build ARG.
   already carries a "superseded" banner. Do not treat them as current spec.
 - `stored-procs/onboard_a_new_employee_and_record_their_.sql` is a saved generation
   output, not source. It belongs in `docs/sample-output/`.
+- `full_script` is a sectioned document, not a script that runs top to bottom. The
+  `PRE_VALIDATION` / `POST_VALIDATION` patterns are `DO` blocks that reference procedure
+  parameters (`p_payroll_run_id`) out of scope, and `ROLLBACK_AUTO` is a bare handler
+  fragment. This predates Phase 1b. Do not claim the output is directly executable.
 - Retrieval precision is loose on some prompts — all 9 tables live in one domain, so
   embeddings cluster tightly. The eval thresholds (recall ≥ 0.5 per case, ≥ 0.6 mean)
   are regression canaries, **not** a claim that retrieval is good.

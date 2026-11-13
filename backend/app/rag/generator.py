@@ -64,6 +64,56 @@ containing only SQL/PL-pgSQL code (no prose, no markdown fences):
 -- SECTION: ROLLBACK_AUTO
 -- SECTION: ROLLBACK_MANUAL
 
+Each section has a fixed content contract:
+- PRE_VALIDATION: guard checks that fail fast before any data is touched \
+(target rows exist, are in the expected state, inputs are sane).
+- TEMP_TABLES: CREATE TEMP TABLE statements that stage computed rows.
+- BACKUP: snapshot of the rows about to be mutated.
+- MAIN_SCRIPT: the one complete `CREATE OR REPLACE PROCEDURE <name>(...) \
+LANGUAGE plpgsql AS $$ ... $$;` definition for this request, ending in its \
+`EXCEPTION WHEN OTHERS THEN ... RAISE;` handler. This is the largest section. \
+The main procedure is defined here and nowhere else.
+- POST_VALIDATION: checks that the mutation left the data consistent, \
+raising on failure.
+- ROLLBACK_AUTO: only the `EXCEPTION WHEN OTHERS THEN ...` handler that closes \
+the MAIN_SCRIPT body, restated on its own. Never a CREATE PROCEDURE.
+- ROLLBACK_MANUAL: a separate `rollback_<name>` procedure that restores from \
+the BACKUP snapshot after a committed run. Never a copy of the main procedure.
+
+Worked example of the shape (abbreviated -- a real answer has full SQL in \
+every section):
+-- SECTION: PRE_VALIDATION
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM payroll_runs WHERE payroll_run_id = 1) \
+THEN RAISE EXCEPTION 'run 1 not found'; END IF; END $$;
+-- SECTION: TEMP_TABLES
+CREATE TEMP TABLE tmp_calc (employee_id INTEGER, net_pay NUMERIC) ON COMMIT DROP;
+-- SECTION: BACKUP
+INSERT INTO payroll_entries_backup (...) SELECT ... FROM payroll_entries WHERE payroll_run_id = 1;
+-- SECTION: MAIN_SCRIPT
+CREATE OR REPLACE PROCEDURE process_payroll_run(p_payroll_run_id INTEGER)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE payroll_runs SET status = 'processing' WHERE payroll_run_id = p_payroll_run_id;
+    -- ... the main mutation ...
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'process_payroll_run failed: %', SQLERRM;
+        RAISE;
+END;
+$$;
+-- SECTION: POST_VALIDATION
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM payroll_entries WHERE net_pay < 0) \
+THEN RAISE EXCEPTION 'negative net_pay'; END IF; END $$;
+-- SECTION: ROLLBACK_AUTO
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'process_payroll_run failed: %', SQLERRM;
+        RAISE;
+-- SECTION: ROLLBACK_MANUAL
+CREATE OR REPLACE PROCEDURE rollback_payroll_run(p_payroll_run_id INTEGER)
+LANGUAGE plpgsql AS $$ BEGIN /* restore from payroll_entries_backup */ END; $$;
+
 If a section genuinely doesn't apply to this request, still include its marker \
 followed by a one-line comment explaining why it's empty.
 
