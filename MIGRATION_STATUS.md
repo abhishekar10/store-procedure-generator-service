@@ -62,8 +62,9 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 ```bash
 cd backend
 
-.venv/bin/python -m pytest -q          # 69 offline tests, ~1.3s, no API key needed
-.venv/bin/python -m pytest evals/ -q   # 23 live-API evals, ~3m40s, costs real tokens
+.venv/bin/python -m pytest -q          # 99 offline tests, ~2s, no API key needed
+.venv/bin/python -m pytest evals/ -q   # 23 live-API evals, ~1 min, costs real tokens
+.venv/bin/python -m app.openapi_export # regenerate docs/openapi.json after an API change
 .venv/bin/ruff check .                 # lint
 .venv/bin/ruff check . --fix
 
@@ -573,41 +574,77 @@ Pass it with `--secret id=gemini_key,env=GEMINI_API_KEY`, never as a build ARG.
 
 ## 7. Known issues not yet addressed
 
-- **`README.md` files are partly stale.** Their API and history sections are current
-  (Phase 3), but `backend/README.md` and `frontend/README.md` still describe the old
-  monorepo layout: a shared `rag/.venv`, `pip install -r
-  requirements.txt`, `cd "05 - RAG Project/backend"`, and a `GEMINI_API_KEY` read from
-  `rag/.env` in their setup sections. The root has no README at all yet.
-- `backend/evals/test_retrieval_eval.py` and `backend/README.md` cite
-  `06 - Interview Questions/00-review-findings.md`, which did not travel with the
-  extraction. Rewrite those citations to stand alone.
-- `frontend/.env.local` (gitignored) still points at a hardcoded LAN IP
-  `http://192.168.1.11:8000`. Harmless for compose, breaks `npm run dev` when the DHCP
-  lease changes.
-- `planning/*.md` are historical design notes, partly superseded. `01-frontend.md`
-  already carries a "superseded" banner. Do not treat them as current spec.
-- `stored-procs/onboard_a_new_employee_and_record_their_.sql` is a saved generation
-  output, not source. It belongs in `docs/sample-output/`.
-- Execution against real Postgres was verified by hand (Phase 1c), not automated. A CI
-  job that loads the schema into a Postgres service container and compiles each eval
-  generation would turn that into a regression check (planned, not built).
+- `planning/*.md` are historical design notes, partly superseded. `00-overview.md` and
+  `01-frontend.md` carry "superseded" banners. Do not treat them as current spec.
+- Execution against real Postgres is verified by hand (Phase 1c, the thinking-level
+  benchmark, `docs/sample-output/`), not automated. A CI job that loads the schema into
+  a Postgres service container and compiles and calls each eval generation would make it
+  a regression check (planned, not built). The scratch harness that did it by hand
+  picked arguments heuristically; a CI version needs per-prompt call fixtures.
 - Retrieval precision is loose on some prompts — all 9 tables live in one domain, so
   embeddings cluster tightly. The eval thresholds (recall ≥ 0.5 per case, ≥ 0.6 mean)
   are regression canaries, **not** a claim that retrieval is good.
+- The classifier accepts on-topic-sounding requests for other databases or domains
+  (e.g. "a MySQL stored procedure for a library's book loans"); its prompt only
+  rejects requests unrelated to *any* database operation. Owner's call whether to tighten.
+- The demo UI has been verified by build, lint, a Node check of its storage module and
+  its request flow against the containers, but **not clicked through in a browser**.
+- The Mermaid diagrams in `docs/ARCHITECTURE.md` have not been rendered by a tool.
+
+Resolved in the documentation pass (2026-11-14): stale README setup sections (all three
+READMEs now describe this repo; there is a root README), the citations of
+`06 - Interview Questions/...`, the LAN IP in `frontend/.env.local` (the file no longer
+exists), and the saved generation in `stored-procs/` — that one predated the Phase 1b
+fix (it used `DO $$` blocks), so it was replaced by a fresh, Postgres-checked sample in
+`docs/sample-output/` rather than moved.
 
 ---
 
 ## 8. State right now
 
-- Phases 0–2 and the thinking-level change are pushed to `origin/main`. There are no
-  git credentials configured on this machine — no helper, no `~/.git-credentials`, no
-  SSH keys — so the owner pushes from VS Code's source control panel, not the CLI.
-- **`aws configure` has not been run.** Region and credentials are unset. Needed before
-  Phase 5, not before.
+- Everything through Phase 4 (except the evals CI job) is pushed to `origin/main`.
+  There are no git credentials configured on this machine — no helper, no
+  `~/.git-credentials`, no SSH keys — so the owner pushes from VS Code's source control
+  panel, not the CLI.
+- **An AWS account exists (owner, 2026-11-14). The CLI is not configured** (`~/.aws`
+  does not exist). See "Before Phase 5" below for what is needed.
 - The compose stack may still be running (`docker compose ps`). `docker compose down`
-  to stop it.
+  to stop it. A scratch Postgres container `sp-pg` may also be running
+  (`docker rm -f sp-pg`).
 - `backend/db/reference.db` and `backend/data/vector_store/` exist locally and are
   gitignored. Rebuild with `db/build_db.py` and `python -m app.rag.ingest`.
+
+### Before Phase 5
+
+From the owner:
+
+1. **CLI credentials that are not the root user's.** Preferred: IAM Identity Center
+   with a user holding `AdministratorAccess` for this account, then
+   `aws configure sso` (profile name e.g. `sp-generator`, region `ap-south-1`). An IAM
+   user with access keys also works. Never root access keys. Keys are entered into the
+   CLI by the owner, never pasted into a chat or committed.
+2. **MFA on the root user**, and a **budget alert** (AWS Budgets, e.g. ₹1,000/month,
+   email at 50/80/100%) — the budget is small and this is the backstop.
+3. **The HTTPS decision** (below).
+
+Then, without creating anything: `aws sts get-caller-identity --profile sp-generator`
+confirms access; `terraform init/validate/plan` run freely. `terraform apply` waits for
+the owner's go-ahead in that session.
+
+**HTTPS / mixed content — needs a decision.** The UI on CloudFront is HTTPS. An ALB
+without a domain serves only HTTP (an ACM certificate needs a domain), and browsers
+block an HTTPS page calling an HTTP API. Options:
+
+- **(a) CloudFront in front of the ALB too** — one CloudFront distribution, `/` → S3,
+  `/v1/*` → ALB. HTTPS everywhere on the `*.cloudfront.net` name, no domain needed, and
+  no CORS (same origin). Caveat: CloudFront's origin read timeout is 30s by default (60s
+  max without a quota request). The stream is fine — it sends status events at once and
+  a heartbeat every 15s — but non-streaming `/v1/generate` must answer within it
+  (typically ~15s; `auto` thinking or slow upstreams would exceed it).
+- **(b) A domain the owner controls** (Route 53 or external DNS) + ACM certificate on
+  the ALB, and the UI calls `https://api.<domain>`.
+
+Recommendation: (a) — no domain cost, simplest, and the UI uses the stream anyway.
 
 ---
 

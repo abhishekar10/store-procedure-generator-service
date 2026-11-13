@@ -31,15 +31,24 @@ frontend/
 
 ## Setup
 
+Node 22 (the version the image builds with):
+
 ```bash
-cd "05 - RAG Project/frontend"
-npm install
-npm run dev
+cd frontend
+npm ci
+npm run dev        # http://localhost:5173
+npm run lint       # oxlint
+npm run build      # static files in dist/
 ```
 
-Runs at http://localhost:5173. The backend is expected at
-`http://127.0.0.1:8000` by default; override with a `VITE_API_BASE_URL` env
-var (e.g. in a `.env.local`) if it's running elsewhere.
+The backend is expected at `http://127.0.0.1:8000` by default; set
+`VITE_API_BASE_URL` (e.g. in a gitignored `.env.local`) if it runs
+elsewhere. Vite inlines it at build time, so in the container image it is a
+build argument, not a runtime setting. The backend must allow the UI's
+origin: `CORS_ALLOW_ORIGINS=http://localhost:5173` (compose sets this).
+
+With `docker compose up --build` from the repo root the UI is built and
+served by nginx on :5173 instead; no local Node install is needed.
 
 ## How the chat maps to the backend
 

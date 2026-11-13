@@ -18,6 +18,9 @@ generation time.
 backend/
   app/
     main.py                    FastAPI app and routes
+    api_models.py              /v1 request + response models (the contract)
+    openapi_export.py          writes docs/openapi.json
+    errors.py, middleware.py, observability.py, ratelimit.py   hardening (see below)
     config.py                  paths, env vars, model names
     adapters/                  the three seams, and one implementation of each
       base.py                    LLMProvider / VectorStore / SchemaSource protocols + data types
@@ -42,8 +45,8 @@ backend/
     vector_store/                Chroma persistent store (generated, gitignored)
   tests/                      fast, offline unit tests (no API calls) -- default `pytest` run
   evals/                       RAG quality evals (live API calls) -- run explicitly with `pytest evals/`
-  pytest.ini
-  requirements.txt
+  pyproject.toml               pinned dependencies, pytest and ruff settings
+  Dockerfile                   multi-stage image; embeds the corpora at build time
 ```
 
 `db/reference.db` and `data/vector_store/` are generated
@@ -52,31 +55,30 @@ them directly.
 
 ## Setup
 
-Dependencies are split across two files:
-
-- `rag/requirements.txt` (project root, one level up from `05 - RAG
-  Project/`) — shared across all RAG exercises: `chromadb`,
-  `langchain-google-genai`, `python-dotenv`, etc.
-- `backend/requirements.txt` — backend-only additions: `fastapi`, `uvicorn`.
+Python 3.12. Dependencies are pinned in `pyproject.toml` (the `dev` extra
+adds pytest, httpx, jsonschema and ruff). With [uv](https://docs.astral.sh/uv/):
 
 ```bash
-cd rag
-source .venv/bin/activate        # shared venv for all rag/ projects
-uv pip install --python .venv/bin/python3 -r "05 - RAG Project/backend/requirements.txt"
+cd backend
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e ".[dev]"
 ```
 
-`GEMINI_API_KEY` is read from `rag/.env` (shared across all rag/ projects,
-not duplicated per-project).
+Configuration comes from environment variables, or a `.env` file at the
+repo root for local development (`cp ../.env.example ../.env`). Only
+`GEMINI_API_KEY` is required; every other setting has a working default and
+is listed, with what it does, in `../.env.example` and `app/config.py`.
+Missing the key does not stop the service starting: `/health` answers,
+`/ready` reports `not_ready`, and generation returns `not_configured`.
 
 ## Build the reference database
 
 ```bash
-cd "05 - RAG Project/backend/db"
-python3 build_db.py
+.venv/bin/python db/build_db.py
 ```
 
-Drops and rebuilds `reference.db` from `schema.sql` + `seed_data.sql`. Safe
-to re-run any time.
+Drops and rebuilds `db/reference.db` from `db/schema.sql` + `db/seed_data.sql`.
+No API key needed; safe to re-run any time.
 
 ## Embed the RAG corpus
 
@@ -95,9 +97,11 @@ vector dimension: delete `data/vector_store/` before re-ingesting.
 ## Run the API
 
 ```bash
-cd "05 - RAG Project/backend"
-python3 -m uvicorn app.main:app --reload --port 8000
+.venv/bin/python -m uvicorn app.main:app --reload --port 8000
 ```
+
+Or the whole stack in containers, from the repo root: `docker compose up --build`
+(UI on :5173, API on :8000).
 
 Interactive API docs (Swagger UI, with "Try it out" to call endpoints
 directly from the browser): http://127.0.0.1:8000/api/docs
@@ -397,27 +401,30 @@ local telemetry store.
 Two separate layers, on purpose -- they test different things and have very
 different costs:
 
-- **`tests/`** -- fast, deterministic, offline unit tests (no network, no API
-  key required). Covers `section_parser`, `validator`, the pattern templates,
-  thinking-level settings and fallback, and the `/v1` API end to end with
-  both Gemini call sites faked: the request contract, history reaching the
-  prompt, typed errors, retries, rate limiting, SSE shape and heartbeat.
+- **`tests/`** -- fast, deterministic, offline tests (no network, no API
+  key). Covers `section_parser`, `validator`, the pattern templates, the
+  thinking-level settings and fallback, the retry policy and rate limiter,
+  logging and metrics, the `/v1` API end to end with the model faked (the
+  request contract, history reaching the prompt, typed errors, retries, SSE
+  shape and heartbeat), and the contract test against `docs/openapi.json`.
   This is what `pytest` runs by default.
-- **`evals/`** -- RAG *quality* evals against a small golden set, calling the
-  real Gemini API (real cost, ~30s total). `test_classifier_eval.py` checks
-  the classification gate's accuracy on a labeled set of on-topic/off-topic
-  prompts and context-dependent follow-ups (including the exact cases that
-  were misclassified before the gate was made context-aware).
-  `test_retrieval_eval.py` checks schema-retrieval recall against the four
-  candidate prompts documented in `planning/03a-reference-schema-design.md`,
-  with thresholds set as regression canaries, not a claim that retrieval is
-  perfect -- see the retrieval precision limitation noted in
-  `06 - Interview Questions/00-review-findings.md`.
+- **`evals/`** -- quality evals against a small golden set, calling the real
+  Gemini API (real cost). `test_classifier_eval.py` checks the
+  classification gate on on-topic and off-topic prompts and on
+  context-dependent follow-ups, including the exact cases that were
+  misclassified before the gate was made context-aware.
+  `test_retrieval_eval.py` checks schema-retrieval recall for the four
+  candidate prompts in `planning/03a-reference-schema-design.md`; its
+  thresholds are regression canaries, not a claim that retrieval is good
+  (all nine tables are in one domain, so embeddings cluster tightly).
+  `test_generation_shape_eval.py` generates all four golden prompts and
+  checks the result is one procedure spanning the seven sections and passes
+  the validator. Needs the vector store (`python -m app.rag.ingest`).
 
 ```bash
-cd "05 - RAG Project/backend"
-python3 -m pytest              # fast unit tests only (~0.05s)
-python3 -m pytest evals/       # live-API evals (~30s, costs real tokens)
+.venv/bin/python -m pytest -q          # 99 offline tests, ~2s
+.venv/bin/python -m pytest evals/ -q   # 23 live evals, ~1 min
+.venv/bin/ruff check .
 ```
 
 ## Models

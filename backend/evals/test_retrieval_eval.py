@@ -3,8 +3,7 @@ already ingested via `python -m app.rag.ingest`) for every case. Run
 explicitly with `pytest evals/`, not part of the default `pytest` run.
 
 Thresholds here are deliberately not "100% recall" -- retrieval precision on
-this schema is a known, documented limitation (see
-`06 - Interview Questions/00-review-findings.md`, finding #9): all 9 tables
+this schema is a known limitation: all 9 tables
 live in one HR/payroll domain, so embedding distances cluster tightly and a
 borderline-relevant table occasionally edges out a more relevant one. These
 thresholds are canaries for a real regression (e.g. retrieval breaking and
