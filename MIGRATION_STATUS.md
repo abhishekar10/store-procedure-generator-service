@@ -331,6 +331,17 @@ Phase 1b/1c re-baselines (4 golden prompts each, run concurrently) measured **44
 end to end. The 232s run is a new worst case. Plan for ~240s: the generation timeout must
 exceed it, and the ALB's `idle_timeout = 300` leaves only modest headroom.
 
+**Update (thinking level).** Profiling showed local work (retrieval, prompt
+assembly, validation) is ~0.13s of a ~255s request; the rest is Gemini, almost
+all of it silent reasoning before the first token. `GENERATION_THINKING_LEVEL`
+now defaults to `low`: 11–16s per generation on the golden prompts instead of
+39–162s, with every script still compiling and running in Postgres (4 prompts,
+one run — see README "Thinking level"). The constraints below still hold for
+`auto` and for the fallback when a model rejects the level, so the 300s
+timeouts are unchanged; with `low` they are headroom rather than a squeeze.
+`CLASSIFIER_THINKING_LEVEL` (also `low`) takes the classifier from ~3.9s to
+~2.4s median with identical answers over 23 scenarios × 3 runs.
+
 **This is the dominant architectural constraint.**
 
 - ALB's default idle timeout is 60s and would kill every request. **Set

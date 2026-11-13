@@ -11,6 +11,14 @@ Measured against a local server that accepts connections and never answers:
   request. It hung indefinitely. Its client is replaced below with a
   google-genai `Client` configured with a timeout and retry policy, which
   was verified to time out and retry as set.
+
+Generation and the classifier each send a thinking level
+(GENERATION_THINKING_LEVEL, CLASSIFIER_THINKING_LEVEL, both default "low"):
+the model's own default spent most of each request thinking. The model alias
+floats, so a future model may reject a level -- 3.8-flash already rejects
+"minimal" with a 400. Such a rejection drops that level for that model for
+the life of the process and retries at once without it, so a model change
+slows requests down instead of failing all of them.
 """
 
 import logging
@@ -19,11 +27,12 @@ from collections.abc import Callable
 from typing import Literal
 
 from google.genai import Client
+from google.genai import errors as genai_errors
 from google.genai.types import HttpOptions, HttpRetryOptions
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
 from app.config import get_settings
-from app.errors import upstream_status
+from app.errors import find_in_chain, upstream_status
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +41,55 @@ logger = logging.getLogger(__name__)
 # mean the call already ran for minutes, and a retry would double that.
 RETRYABLE_GENERATION_STATUS = frozenset({429, 500, 502, 503})
 
+Purpose = Literal["classify", "generate"]
 
-def build_chat_model(purpose: Literal["classify", "generate"]) -> ChatGoogleGenerativeAI:
+# (model, thinking level) pairs Gemini has refused with a 400. Keyed by level
+# as well as model: a model that rejects "high" may still accept "low".
+_thinking_rejected: set[tuple[str, str]] = set()
+
+
+def _configured_thinking_level(purpose: Purpose) -> str:
+    settings = get_settings()
+    return settings.classifier_thinking_level if purpose == "classify" else settings.generation_thinking_level
+
+
+def thinking_level(purpose: Purpose) -> str | None:
+    """The thinking level a `purpose` call sends, or None to leave it to the
+    model -- either because it is set to "auto" or because the model refused it."""
+    level = _configured_thinking_level(purpose)
+    if level == "auto" or (get_settings().generation_model, level) in _thinking_rejected:
+        return None
+    return level
+
+
+def disable_thinking_if_rejected(exc: BaseException, purpose: Purpose) -> bool:
+    """True, once per model and level, when `exc` is Gemini refusing the
+    thinking level `purpose` sent. Later builds then omit it."""
+    level = thinking_level(purpose)
+    api_error = find_in_chain(exc, genai_errors.ClientError)
+    if level is None or api_error is None or api_error.code != 400 or "thinking" not in str(api_error).lower():
+        return False
+    model = get_settings().generation_model
+    _thinking_rejected.add((model, level))
+    logger.warning(
+        "thinking_level_rejected",
+        extra={"purpose": purpose, "model": model, "thinking_level": level, "upstream_message": str(api_error)[:300]},
+    )
+    return True
+
+
+def with_thinking_fallback[T](call: Callable[[], T], purpose: Purpose) -> T:
+    """Runs `call`; if Gemini refuses the thinking level, runs it once more
+    without it. `call` must build its model afresh, so the retry omits it."""
+    try:
+        return call()
+    except Exception as exc:
+        if not disable_thinking_if_rejected(exc, purpose):
+            raise
+        return call()
+
+
+def build_chat_model(purpose: Purpose) -> ChatGoogleGenerativeAI:
     settings = get_settings()
     if purpose == "classify":
         timeout, attempts, temperature = settings.classifier_timeout_s, settings.classifier_attempts, 0.0
@@ -41,12 +97,14 @@ def build_chat_model(purpose: Literal["classify", "generate"]) -> ChatGoogleGene
         # A single attempt at the library level; retries are decided by
         # call_with_retry, which can tell a fast 429 from a slow timeout.
         timeout, attempts, temperature = settings.generation_timeout_s, 1, 0.2
+    level = thinking_level(purpose)
     return ChatGoogleGenerativeAI(
         model=settings.generation_model,
         google_api_key=settings.require_gemini_api_key(),
         temperature=temperature,
         timeout=timeout,
         max_retries=attempts,
+        **({} if level is None else {"thinking_level": level}),
     )
 
 
@@ -92,12 +150,15 @@ def call_with_retry[T](
     attempts: int,
     clock: Callable[[], float] = time.monotonic,
 ) -> T:
-    for attempt in range(1, attempts + 1):
+    attempt = 1
+    while True:
         started = clock()
         try:
             return call()
         except Exception as exc:
+            if disable_thinking_if_rejected(exc, "generate"):
+                continue  # not a failed attempt: retry at once, without the setting
             if not should_retry_generation(exc, attempt=attempt, attempts=attempts, elapsed_s=clock() - started):
                 raise
             time.sleep(get_settings().generation_retry_backoff_s * attempt)
-    raise AssertionError("unreachable")  # pragma: no cover
+            attempt += 1

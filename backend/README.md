@@ -255,6 +255,28 @@ arrived within 30s of the attempt starting; a stream is retried only before
 any text has been sent. All of these are environment variables (see
 `app/config.py`).
 
+**Thinking level** (`GENERATION_THINKING_LEVEL`, default `low`). Nearly all
+generation time was the model's hidden reasoning, not this service: with the
+model's own default, gemini-3.8-flash spent 4k-21k thinking tokens on a
+~2k-token script and took 39-162s; at `low` it took 11-16s, and all four
+golden scripts still compiled and ran against the seed data in Postgres.
+`auto` restores the model's default; `medium` and `high` are also accepted.
+The model alias floats, so if a future model rejects the level with a 400,
+logs a `thinking_level_rejected` warning, retries at once without
+it, and stays on the model default for that model until restart -- slower,
+but not failing. The 300s timeout is kept because `auto`, or that fallback,
+still takes minutes.
+
+The classifier has its own setting, `CLASSIFIER_THINKING_LEVEL` (default
+`low`, same values and the same fallback). Over 23 scenarios run 3 times each
+-- on- and off-topic requests, follow-ups, typos, Hinglish, a prompt-injection
+attempt, an off-topic pivot mid-conversation -- `auto` and `low` gave
+identical answers on every run; `low` cut the median call from 3.9s to 2.4s
+and the slowest from 17.4s to 5.7s. A rejected level is remembered per model
+*and* level, so a model refusing generation's level does not switch off a
+different level the classifier still uses. Both levels appear on the
+`classification` and `generation` log lines as `thinking_level`.
+
 **Rate limiting** (`app/ratelimit.py`). An in-process token bucket on the
 two generation endpoints, per client IP: 6/minute, burst 3 by default. It is
 a fallback -- each task keeps its own buckets, so N tasks allow N times the

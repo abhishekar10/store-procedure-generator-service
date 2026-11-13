@@ -9,7 +9,7 @@ importing the app (for tests, for a liveness probe, for the ingest CLI's
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -55,6 +55,19 @@ class Settings(BaseSettings):
     # both returned 404 on this key, so the current-stable aliases are used.
     generation_model: str = "models/gemini-flash-latest"
     embedding_model: str = "models/gemini-embedding-001"
+    # How long the generation model reasons before answering. "auto" sends no
+    # setting and lets the model decide. Measured on gemini-3.8-flash over the
+    # four golden prompts: auto spent 4k-21k hidden thinking tokens and took
+    # 39-162s; "low" took 11-16s, and every script still compiled and ran
+    # against the seed data in Postgres. "low" is the default. If the model
+    # the alias points to rejects the setting, generation falls back to auto
+    # (see app/rag/llm.py) rather than failing.
+    generation_thinking_level: Literal["auto", "low", "medium", "high"] = "low"
+    # The same for the request classifier. Measured over 23 scenarios x 3 runs
+    # (on/off-topic, follow-ups, typos, Hinglish, prompt injection): auto and
+    # low gave identical answers on every run; low cut the median from 3.9s
+    # to 2.4s and the worst case from 17.4s to 5.7s.
+    classifier_thinking_level: Literal["auto", "low", "medium", "high"] = "low"
 
     # --- retrieval -------------------------------------------------------
     retrieval_top_k: int = Field(default=5, ge=1, le=25)
@@ -127,6 +140,12 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @field_validator("generation_thinking_level", "classifier_thinking_level", mode="before")
+    @classmethod
+    def _lower_thinking_level(cls, value: object) -> object:
+        """GENERATION_THINKING_LEVEL=LOW and =low are the same setting."""
+        return value.strip().lower() if isinstance(value, str) else value
 
     def require_gemini_api_key(self) -> str:
         """Returns the key, or raises with an actionable message.

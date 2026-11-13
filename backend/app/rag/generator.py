@@ -12,7 +12,14 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from app.config import get_settings
 from app.errors import UpstreamTimeout
 from app.observability import prompt_fingerprint
-from app.rag.llm import build_chat_model, call_with_retry, should_retry_generation
+from app.rag.llm import (
+    build_chat_model,
+    call_with_retry,
+    disable_thinking_if_rejected,
+    should_retry_generation,
+    thinking_level,
+    with_thinking_fallback,
+)
 from app.rag.retriever import RetrievedChunk, retrieve_context
 from app.rag.section_parser import parse_sections
 from app.rag.validator import validate_script
@@ -223,10 +230,10 @@ def classify_request(user_prompt: str, prior_messages: list[dict] | None = None)
     so a short follow-up ("make it handle nulls too") is judged in the
     context of an already-established stored-procedure conversation, not in
     isolation."""
-    llm = _build_llm("classify")
     conversation_block = _format_classifier_conversation_block(prior_messages)
     prompt = CLASSIFIER_PROMPT.format(conversation_block=conversation_block, user_prompt=user_prompt)
-    response_text = _extract_text(llm.invoke(prompt).content)
+    response = with_thinking_fallback(lambda: _build_llm("classify").invoke(prompt), "classify")
+    response_text = _extract_text(response.content)
 
     answer_match = _ANSWER_RE.search(response_text)
     reason_match = _REASON_RE.search(response_text)
@@ -248,6 +255,7 @@ def _classify(user_prompt: str, prior_messages: list[dict] | None, timings: dict
             # only for rejections, where it is what you need to tune the gate.
             "reason": None if is_valid else reason,
             "latency_ms": timings["classify"],
+            "thinking_level": thinking_level("classify") or "auto",
             "prior_messages": len(prior_messages or []),
             **prompt_fingerprint(user_prompt),
         },
@@ -298,6 +306,7 @@ def _finalize(
         "generation",
         extra={
             "latency_ms": timings.get("generation"),
+            "thinking_level": thinking_level("generate") or "auto",
             "script_chars": len(full_script),
             "sql_valid": sql_valid,
             "sql_issues": sql_issues,
@@ -345,7 +354,9 @@ def _stream_generation(prompt: str) -> Iterator[str]:
     settings = get_settings()
     deadline = time.monotonic() + settings.generation_timeout_s
 
-    for attempt in range(1, settings.generation_attempts + 1):
+    attempt = 0
+    while True:
+        attempt += 1
         started = time.monotonic()
         emitted = False
         try:
@@ -360,6 +371,9 @@ def _stream_generation(prompt: str) -> Iterator[str]:
         except UpstreamTimeout:
             raise
         except Exception as exc:
+            if not emitted and disable_thinking_if_rejected(exc, "generate"):
+                attempt -= 1  # not a failed attempt: retry at once, without the setting
+                continue
             elapsed_s = time.monotonic() - started
             if emitted or not should_retry_generation(
                 exc, attempt=attempt, attempts=settings.generation_attempts, elapsed_s=elapsed_s
