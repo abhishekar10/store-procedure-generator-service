@@ -104,7 +104,7 @@ deployment in [`infra/`](infra/README.md), applied and verified live (UI over
 HTTPS, `/ready` 200, a real generation) and destroyed between demos; the
 budget kill switch, tested live.
 
-CI/CD on GitHub Actions (see "How it deploys"), verified on 2026-11-15: a
+CI/CD on GitHub Actions (see "How it deploys"), verified on 2026-11-14: a
 push to `main` passed CI, built and pushed both images, and rolled the live
 service to them with no downtime; the live-API evals workflow passed when
 run by hand.
