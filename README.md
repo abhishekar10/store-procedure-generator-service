@@ -103,8 +103,9 @@ deployment in [`infra/`](infra/README.md), applied and verified live (UI over
 HTTPS, `/ready` 200, a real generation) and destroyed between demos; the
 budget kill switch, tested live.
 
-Written, not yet run on GitHub: the CI/CD workflows in `.github/workflows/`
-(see "How it deploys"). They need two repository settings first.
+CI/CD on GitHub Actions (see "How it deploys"): verified end to end on
+2026-11-15 -- a push to `main` passed CI, built and pushed both images, and
+rolled the live service to them with no downtime.
 
 Planned, not built: MySQL support; generating against your own schema with
 a visual schema editor. See [`docs/ROADMAP.md`](docs/ROADMAP.md) and

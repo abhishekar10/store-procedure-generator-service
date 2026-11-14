@@ -608,7 +608,13 @@ Cost guard: `make up` / `make down`.
 
 ### Phase 6 — CI/CD
 
-**Status (2026-11-15): written, checked locally; not yet run on GitHub.** `ci.yml`
+**Status (2026-11-15): done and verified end to end on GitHub** (evals workflow not yet
+run). Deploy run 4 (`cbf1860`): CI green (4 jobs, ~20s each); deploy 292s — images built
+and pushed in 87s, the live service rolled from task definition revision 2 to 3 (both
+containers on `cbf1860c082b`) in 199s with the site up throughout; afterwards `/` 200 and a
+real `/v1/generate` returned valid SQL in 22s. Run 3 had failed on a missing
+`ecr:DescribeRepositories` grant (CloudTrail), now added. Originally: written, checked
+locally. `ci.yml`
 (PRs/branches, and called by deploy), `deploy.yml` (push to main: CI → build and push
 images → roll the service if the demo is up), `evals.yml` (manual; nightly if
 `NIGHTLY_EVALS=true`). Decisions: ECR moved to the account stack so pushes work while the
