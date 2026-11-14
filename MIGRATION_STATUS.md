@@ -608,8 +608,10 @@ Cost guard: `make up` / `make down`.
 
 ### Phase 6 — CI/CD
 
-**Status (2026-11-15): done and verified end to end on GitHub** (evals workflow not yet
-run). Deploy run 4 (`cbf1860`): CI green (4 jobs, ~20s each); deploy 292s — images built
+**Status (2026-11-15): done and verified end to end on GitHub. Phase 6 is complete.**
+Evals workflow run by hand on `cbf1860`: green in 61s (vector store built in CI in 5s, evals
+48s, `eval-results` JUnit artifact uploaded; its contents were not read here — that needs
+an authenticated download). Deploy run 4 (`cbf1860`): CI green (4 jobs, ~20s each); deploy 292s — images built
 and pushed in 87s, the live service rolled from task definition revision 2 to 3 (both
 containers on `cbf1860c082b`) in 199s with the site up throughout; afterwards `/` 200 and a
 real `/v1/generate` returned valid SQL in 22s. Run 3 had failed on a missing
