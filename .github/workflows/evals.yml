@@ -16,8 +16,8 @@ jobs:
   evals:
     if: github.event_name == 'workflow_dispatch' || vars.NIGHTLY_EVALS == 'true'
     runs-on: ubuntu-24.04
-    env:
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    # GEMINI_API_KEY is given only to the two steps that call Gemini, not the
+    # whole job, so no third-party action ever runs with it in its environment.
     defaults:
       run:
         working-directory: backend
@@ -31,11 +31,15 @@ jobs:
           uv pip install --python .venv/bin/python -e ".[dev]"
 
       - name: Build the reference database and vector store
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           .venv/bin/python db/build_db.py
           .venv/bin/python -m app.rag.ingest
 
       - name: Run the evals
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: .venv/bin/python -m pytest evals -q -m eval --junitxml=eval-results.xml
 
       - name: Upload results
