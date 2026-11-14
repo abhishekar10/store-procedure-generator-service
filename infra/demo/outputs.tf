@@ -9,11 +9,11 @@ output "alb_url" {
 }
 
 output "ecr_api_repository_url" {
-  value = module.ecr_api.repository_url
+  value = data.aws_ecr_repository.api.repository_url
 }
 
 output "ecr_ui_repository_url" {
-  value = module.ecr_ui.repository_url
+  value = data.aws_ecr_repository.ui.repository_url
 }
 
 output "api_key_secret_id" {

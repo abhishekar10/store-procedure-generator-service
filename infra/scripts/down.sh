@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Destroys the demo stack: everything `make up` created, including the ECR
-# images, the UI bucket and the API-key secret. Leaves the account stack (the
-# budget and the kill switch) alone.
+# Destroys the demo stack: everything `make up` created, including the
+# API-key secret. Leaves the account stack alone -- the DNS zone and
+# certificate, the ECR repositories and their images, the budget and the
+# kill switch.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

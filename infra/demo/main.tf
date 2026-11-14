@@ -1,7 +1,8 @@
 # The demo stack: brought up with `make up`, destroyed with `make down`.
-# Everything here is disposable -- the ECR repositories and the API-key
-# secret are deleted on destroy. The DNS zone and the TLS certificate it
-# uses live in the long-lived account stack, so the address stays the same.
+# Everything here is disposable -- the API-key secret is deleted on destroy.
+# The DNS zone, TLS certificate and image repositories live in the
+# long-lived account stack, so the address stays the same and built images
+# survive `make down`.
 
 data "aws_route53_zone" "this" {
   name = var.domain_name
@@ -18,16 +19,14 @@ module "network" {
   name   = var.name
 }
 
-module "ecr_api" {
-  source       = "../modules/ecr"
-  name         = var.name
-  force_delete = true
+# The image repositories belong to the account stack (CI pushes to them
+# while the demo is down); this stack only reads them.
+data "aws_ecr_repository" "api" {
+  name = var.name
 }
 
-module "ecr_ui" {
-  source       = "../modules/ecr"
-  name         = "${var.name}-ui"
-  force_delete = true
+data "aws_ecr_repository" "ui" {
+  name = "${var.name}-ui"
 }
 
 # The secret's value is never in Terraform: `make up` writes it from .env
@@ -44,9 +43,9 @@ module "service" {
   name               = var.name
   vpc_id             = module.network.vpc_id
   subnet_ids         = module.network.public_subnet_ids
-  api_image          = "${module.ecr_api.repository_url}:${var.image_tag}"
-  ui_image           = "${module.ecr_ui.repository_url}:${var.image_tag}"
-  repository_arns    = [module.ecr_api.repository_arn, module.ecr_ui.repository_arn]
+  api_image          = "${data.aws_ecr_repository.api.repository_url}:${var.image_tag}"
+  ui_image           = "${data.aws_ecr_repository.ui.repository_url}:${var.image_tag}"
+  repository_arns    = [data.aws_ecr_repository.api.arn, data.aws_ecr_repository.ui.arn]
   api_key_secret_arn = aws_secretsmanager_secret.gemini_api_key.arn
   certificate_arn    = data.aws_acm_certificate.this.arn
   task_cpu           = var.task_cpu

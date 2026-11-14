@@ -32,6 +32,12 @@ variable "domain_name" {
   default     = "sqlgen.abhishek.gen.in"
 }
 
+variable "github_repository" {
+  description = "owner/repo whose main branch may deploy through GitHub Actions."
+  type        = string
+  default     = "abhishekar10/store-procedure-generator-service"
+}
+
 variable "demo_name" {
   description = "The demo stack's `name`; the kill switch targets its cluster, service and ALB by it."
   type        = string

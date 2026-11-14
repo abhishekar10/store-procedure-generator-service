@@ -1,0 +1,100 @@
+name: CI
+
+# Pull requests and branches other than main. Pushes to main run these same
+# jobs through deploy.yml, which deploys only if they pass.
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend lint, tests, dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+
+      - name: Install
+        run: |
+          uv venv --python 3.12 backend/.venv
+          uv pip install --python backend/.venv/bin/python -e "backend[dev]"
+
+      - name: Lint
+        run: |
+          backend/.venv/bin/ruff check backend
+          backend/.venv/bin/ruff check --config backend/pyproject.toml infra/modules/kill_switch
+
+      - name: Unit, API and contract tests
+        working-directory: backend
+        run: .venv/bin/python -m pytest -q
+
+      - name: Kill-switch Lambda tests
+        run: backend/.venv/bin/python -m pytest -q -p no:cacheprovider infra/modules/kill_switch
+
+      # Ignored advisories, each checked and not applicable here:
+      #   PYSEC-2026-311, PYSEC-2026-3813, PYSEC-2026-3814, PYSEC-2026-3815 (chromadb)
+      #     All concern Chroma's HTTP server -- its REST endpoints and tenant
+      #     authorization. This service embeds Chroma as a library
+      #     (PersistentClient) over a read-only store and never runs or
+      #     exposes that server. No fixed release exists (1.5.9 is the latest).
+      # Any other advisory fails the build.
+      - name: Dependency audit (pip-audit)
+        run: |
+          uv pip freeze --python backend/.venv/bin/python --exclude-editable > "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit -r "$RUNNER_TEMP/requirements.txt" --no-deps --disable-pip --progress-spinner off \
+            --ignore-vuln PYSEC-2026-311 \
+            --ignore-vuln PYSEC-2026-3813 \
+            --ignore-vuln PYSEC-2026-3814 \
+            --ignore-vuln PYSEC-2026-3815
+
+  frontend:
+    name: Frontend lint, build, dependency audit
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - name: Dependency audit (npm audit)
+        run: npm audit --audit-level=high
+
+  terraform:
+    name: Terraform fmt and validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.17.2
+      - run: terraform fmt -check -recursive infra
+      - name: Validate both stacks
+        run: |
+          for stack in demo account; do
+            terraform -chdir="infra/$stack" init -backend=false -input=false
+            terraform -chdir="infra/$stack" validate
+          done
+
+  docker:
+    name: Docker builds
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # The full API image embeds the corpus, which needs GEMINI_API_KEY, so
+      # it is built in deploy.yml. Here: every stage up to that point.
+      - name: API image (dependency stage)
+        run: DOCKER_BUILDKIT=1 docker build --target deps -t sp-generator-api:ci backend/
+      - name: UI image
+        run: DOCKER_BUILDKIT=1 docker build --build-arg VITE_API_BASE_URL= -t sp-generator-ui:ci frontend/

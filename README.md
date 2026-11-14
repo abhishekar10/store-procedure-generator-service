@@ -1,5 +1,7 @@
 # Stored Procedure Generator Service
 
+[![Deploy](https://github.com/abhishekar10/store-procedure-generator-service/actions/workflows/deploy.yml/badge.svg)](https://github.com/abhishekar10/store-procedure-generator-service/actions/workflows/deploy.yml)
+
 A small service that turns a plain-English request -- "process payroll for a
 given pay period" -- into one deployable PostgreSQL (PL/pgSQL) stored
 procedure, grounded by retrieval over a reference HR/payroll schema and a
@@ -78,16 +80,32 @@ The offline suite covers the API end to end with the model faked, plus a
 contract test pinning responses to `docs/openapi.json`. Setting up the
 virtualenv is in [`backend/README.md`](backend/README.md).
 
+## How it deploys
+
+The AWS stack is brought up for demos and destroyed afterwards, to keep the
+cloud bill small: `make up` / `make down` from the owner's machine (Terraform,
+see [`infra/README.md`](infra/README.md)). It serves the UI and API at
+`https://sqlgen.abhishek.gen.in` while it is up.
+
+Every push to `main` runs [`deploy.yml`](.github/workflows/deploy.yml): the
+CI checks (lint, tests, dependency audits, Terraform validation, Docker
+builds), then it builds both images, pushes them to ECR tagged with the
+commit, and -- if the stack is up -- rolls the live service to them and
+waits until it is healthy. AWS access is through GitHub OIDC; no AWS keys
+are stored in GitHub. Pull requests run the same checks without deploying.
+The live-API evals run by hand ([`evals.yml`](.github/workflows/evals.yml)).
+
 ## Status
 
 Built: the service, its hardening, the stateless `/v1` API, the adapters,
-the checked-in contract, the container images and local compose.
+the checked-in contract, the container images and local compose; the AWS
+deployment in [`infra/`](infra/README.md), applied and verified live (UI over
+HTTPS, `/ready` 200, a real generation) and destroyed between demos; the
+budget kill switch, tested live.
 
-Written and planned, **not yet applied**: Terraform for AWS in
-[`infra/`](infra/README.md) -- the API and UI on ECS Fargate behind an HTTPS
-ALB at `https://sqlgen.abhishek.gen.in`, and a budget kill switch (applied
-and tested) -- driven by `make up` / `make down`, with a cost estimate.
+Written, not yet run on GitHub: the CI/CD workflows in `.github/workflows/`
+(see "How it deploys"). They need two repository settings first.
 
-Planned, not built: CI/CD on GitHub Actions; MySQL support; generating
-against your own schema with a visual schema editor. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) and [`MIGRATION_STATUS.md`](MIGRATION_STATUS.md).
+Planned, not built: MySQL support; generating against your own schema with
+a visual schema editor. See [`docs/ROADMAP.md`](docs/ROADMAP.md) and
+[`MIGRATION_STATUS.md`](MIGRATION_STATUS.md).

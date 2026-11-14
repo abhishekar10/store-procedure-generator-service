@@ -17,6 +17,31 @@ module "domain" {
   domain_name = var.domain_name
 }
 
+# Image repositories live here, not in the demo stack, so CI can push images
+# while the demo is down and `make up` reuses them.
+module "ecr_api" {
+  source      = "../modules/ecr"
+  name        = var.demo_name
+  keep_images = 3
+}
+
+module "ecr_ui" {
+  source      = "../modules/ecr"
+  name        = "${var.demo_name}-ui"
+  keep_images = 3
+}
+
+module "github_deploy" {
+  source = "../modules/github_deploy"
+
+  name                = "${var.demo_name}-github-deploy"
+  github_repository   = var.github_repository
+  repository_arns     = [module.ecr_api.repository_arn, module.ecr_ui.repository_arn]
+  cluster_name        = var.demo_name
+  service_name        = "${var.demo_name}-api"
+  execution_role_name = "${var.demo_name}-execution"
+}
+
 module "kill_switch" {
   source = "../modules/kill_switch"
 

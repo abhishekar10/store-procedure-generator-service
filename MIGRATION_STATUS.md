@@ -608,6 +608,25 @@ Cost guard: `make up` / `make down`.
 
 ### Phase 6 — CI/CD
 
+**Status (2026-11-15): written, checked locally; not yet run on GitHub.** `ci.yml`
+(PRs/branches, and called by deploy), `deploy.yml` (push to main: CI → build and push
+images → roll the service if the demo is up), `evals.yml` (manual; nightly if
+`NIGHTLY_EVALS=true`). Decisions: ECR moved to the account stack so pushes work while the
+demo is down; deploy is via a GitHub OIDC role (`modules/github_deploy`) scoped to this
+repo's main branch, ECR push for two repos, and rolling one service — no Terraform in CI
+(local state); `scripts/push-images.sh` is shared with `make up`; `roll-service.sh`
+registers a copy of the live task definition with new images. No `environment:` on the
+deploy job (it would change the OIDC subject). Dependency audit findings handled:
+pydantic-settings 2.13.1 → 2.16.3 (CVE-2026-58203); four chromadb advisories ignored with a
+documented reason (they concern Chroma's HTTP server, which is never run; no fix exists);
+three high npm advisories in dev tooling fixed by `npm audit fix` (lockfile only). Checked
+locally: lint, 104 tests, Terraform fmt/validate without a backend, the API deps-stage
+build, the task-definition jq transform, YAML structure. **Not checked: actionlint** (its
+download was blocked here), and nothing has run on GitHub yet. Needs: `make account-apply`
+(adds ECR + OIDC role), the `GEMINI_API_KEY` secret and `AWS_DEPLOY_ROLE_ARN` variable.
+
+Original plan:
+
 - `ci.yml`: ruff, pytest, `terraform fmt`/`validate`, Docker build, `pip-audit`.
 - `deploy.yml`: build and push to ECR tagged with the commit SHA, update ECS, wait for
   stability. **GitHub OIDC**, no long-lived access keys.

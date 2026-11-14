@@ -1,0 +1,55 @@
+name: Deploy
+
+# Every push to main: run CI, then build and push both images to ECR (tagged
+# with the commit), then roll the live service to them if the demo stack is
+# up. When it is down the images wait in ECR for the next `make up`.
+#
+# AWS access is GitHub OIDC: a short-lived token for the role in the
+# AWS_DEPLOY_ROLE_ARN repository variable, which trusts only this
+# repository's main branch. No AWS keys are stored in GitHub.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    # Skipped (not failed) until the AWS side is set up; see infra/README.md.
+    if: vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-24.04
+    # No `environment:` here: it would change the OIDC token's subject from
+    # ref:refs/heads/main to environment:<name>, which the role does not trust.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Image tag
+        run: echo "TAG=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build and push images
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: infra/scripts/push-images.sh
+
+      - name: Roll the service, if the demo is up
+        run: infra/scripts/roll-service.sh

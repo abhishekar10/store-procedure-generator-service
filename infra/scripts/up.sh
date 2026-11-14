@@ -9,8 +9,8 @@
 #      commit (the UI is built for same-origin API calls)
 #   4. scale the service up and wait until the ALB reports it healthy
 #
-# Needs the account stack's DNS zone and certificate (make dns-zone, then
-# make account-apply; see infra/README.md).
+# Needs the account stack's DNS zone, certificate and ECR repositories
+# (make dns-zone, then make account-apply; see infra/README.md).
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -41,24 +41,8 @@ step "API key -> Secrets Manager"
 printf '%s' "$GEMINI_API_KEY" |
   aws secretsmanager put-secret-value --secret-id "$(out api_key_secret_id)" --secret-string file:///dev/stdin >/dev/null
 
-# push <repository-url> <docker build args...>: build and push unless the tag exists.
-push() {
-  local repo="$1"
-  shift
-  if aws ecr describe-images --repository-name "${repo#*/}" --image-ids "imageTag=$TAG" >/dev/null 2>&1; then
-    echo "${repo#*/}:$TAG already pushed"
-    return
-  fi
-  DOCKER_BUILDKIT=1 docker build -t "$repo:$TAG" "$@"
-  docker push "$repo:$TAG"
-}
-
 step "images $TAG -> ECR"
-API_REPO="$(out ecr_api_repository_url)"
-aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${API_REPO%%/*}" >/dev/null
-push "$API_REPO" --secret id=gemini_key,env=GEMINI_API_KEY backend/
-# VITE_API_BASE_URL empty: the UI calls /v1/... on its own origin.
-push "$(out ecr_ui_repository_url)" --build-arg VITE_API_BASE_URL= frontend/
+TAG="$TAG" AWS_REGION="$REGION" infra/scripts/push-images.sh
 
 step "scale to $COUNT task(s) and wait for healthy"
 $TF apply -input=false -auto-approve -var "image_tag=$TAG" -var "desired_count=$COUNT"

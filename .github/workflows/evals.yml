@@ -1,0 +1,46 @@
+name: Evals
+
+# The live-API quality evals: classifier accuracy, schema-retrieval recall,
+# and the shape of four golden generations. They call Gemini and cost real
+# tokens, so they never run on push. Run them by hand, or opt in to the
+# nightly run by setting the repository variable NIGHTLY_EVALS to "true".
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 21 * * *" # 03:00 IST
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    if: github.event_name == 'workflow_dispatch' || vars.NIGHTLY_EVALS == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+
+      - name: Install
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python -e ".[dev]"
+
+      - name: Build the reference database and vector store
+        run: |
+          .venv/bin/python db/build_db.py
+          .venv/bin/python -m app.rag.ingest
+
+      - name: Run the evals
+        run: .venv/bin/python -m pytest evals -q -m eval --junitxml=eval-results.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: eval-results
+          path: backend/eval-results.xml
