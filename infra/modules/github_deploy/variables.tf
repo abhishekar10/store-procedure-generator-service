@@ -8,6 +8,16 @@ variable "github_repository" {
   type        = string
 }
 
+variable "github_owner_id" {
+  description = "Numeric ID of the repository owner (GET /repos/<owner>/<repo> -> owner.id)."
+  type        = string
+}
+
+variable "github_repository_id" {
+  description = "Numeric ID of the repository (GET /repos/<owner>/<repo> -> id)."
+  type        = string
+}
+
 variable "branch" {
   description = "Only workflow runs on this branch may assume the role."
   type        = string

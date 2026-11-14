@@ -104,8 +104,12 @@ an earlier `make up`) already pushed for that commit.
 | [`evals.yml`](../.github/workflows/evals.yml) | By hand; nightly if `NIGHTLY_EVALS` is `true` | The live-API evals; results uploaded as an artifact |
 
 **How a merge deploys.** `deploy.yml` assumes the deploy role through GitHub
-OIDC -- a short-lived token, no AWS keys stored in GitHub; the role trusts
-only `repo:abhishekar10/store-procedure-generator-service:ref:refs/heads/main`.
+OIDC -- a short-lived token, no AWS keys stored in GitHub. The role trusts
+one subject only, `main` of this repository identified by its immutable
+owner and repository IDs:
+`repo:abhishekar10@66424913/store-procedure-generator-service@1456351902:ref:refs/heads/main`
+(GitHub's current subject format; a repository later re-created under the
+same name would have a different ID and could not assume the role).
 It runs `scripts/push-images.sh` (the same script `make up` uses), then
 `scripts/roll-service.sh`: if the demo service exists, it registers a copy of
 the current task definition with the two new images, points the service at

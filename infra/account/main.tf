@@ -34,12 +34,14 @@ module "ecr_ui" {
 module "github_deploy" {
   source = "../modules/github_deploy"
 
-  name                = "${var.demo_name}-github-deploy"
-  github_repository   = var.github_repository
-  repository_arns     = [module.ecr_api.repository_arn, module.ecr_ui.repository_arn]
-  cluster_name        = var.demo_name
-  service_name        = "${var.demo_name}-api"
-  execution_role_name = "${var.demo_name}-execution"
+  name                 = "${var.demo_name}-github-deploy"
+  github_repository    = var.github_repository
+  github_owner_id      = var.github_owner_id
+  github_repository_id = var.github_repository_id
+  repository_arns      = [module.ecr_api.repository_arn, module.ecr_ui.repository_arn]
+  cluster_name         = var.demo_name
+  service_name         = "${var.demo_name}-api"
+  execution_role_name  = "${var.demo_name}-execution"
 }
 
 module "kill_switch" {

@@ -625,6 +625,13 @@ build, the task-definition jq transform, YAML structure. **Not checked: actionli
 download was blocked here), and nothing has run on GitHub yet. Needs: `make account-apply`
 (adds ECR + OIDC role), the `GEMINI_API_KEY` secret and `AWS_DEPLOY_ROLE_ARN` variable.
 
+First runs on GitHub (2026-11-15): run 1 failed at "Set up job" — `astral-sh/setup-uv@v10`
+does not exist (no major tags); pinned to the v10.3.3 commit. Run 2: **all four CI jobs
+green**; deploy failed to assume the role. CloudTrail showed GitHub's OIDC subject is now
+`repo:abhishekar10@66424913/store-procedure-generator-service@1456351902:ref:refs/heads/main`
+(owner and repo IDs included), not the documented `repo:owner/repo:ref:...`; the trust
+policy now matches the ID-based subject exactly.
+
 Original plan:
 
 - `ci.yml`: ruff, pytest, `terraform fmt`/`validate`, Docker build, `pip-audit`.

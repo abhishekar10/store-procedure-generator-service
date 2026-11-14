@@ -12,6 +12,14 @@ data "aws_region" "current" {}
 locals {
   account = data.aws_caller_identity.current.account_id
   region  = data.aws_region.current.region
+  # GitHub's subject claim names the owner and repository with their
+  # immutable numeric IDs (observed in CloudTrail on the first deploy):
+  #   repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/<branch>
+  # Matching on the IDs means a repository later re-created under the same
+  # name cannot assume this role.
+  owner   = split("/", var.github_repository)[0]
+  repo    = split("/", var.github_repository)[1]
+  subject = "repo:${local.owner}@${var.github_owner_id}/${local.repo}@${var.github_repository_id}:ref:refs/heads/${var.branch}"
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -34,7 +42,7 @@ data "aws_iam_policy_document" "trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:ref:refs/heads/${var.branch}"]
+      values   = [local.subject]
     }
   }
 }

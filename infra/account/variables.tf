@@ -38,6 +38,18 @@ variable "github_repository" {
   default     = "abhishekar10/store-procedure-generator-service"
 }
 
+variable "github_owner_id" {
+  description = "Numeric ID of the repository owner; GitHub puts it in the OIDC subject."
+  type        = string
+  default     = "66424913"
+}
+
+variable "github_repository_id" {
+  description = "Numeric ID of the repository; GitHub puts it in the OIDC subject."
+  type        = string
+  default     = "1456351902"
+}
+
 variable "demo_name" {
   description = "The demo stack's `name`; the kill switch targets its cluster, service and ALB by it."
   type        = string
