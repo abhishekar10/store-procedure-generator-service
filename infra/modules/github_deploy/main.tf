@@ -64,6 +64,7 @@ data "aws_iam_policy_document" "deploy" {
     actions = [
       "ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
       "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:BatchGetImage", "ecr:DescribeImages",
+      "ecr:DescribeRepositories", # the scripts look up repository URLs by name
     ]
     resources = var.repository_arns
   }
