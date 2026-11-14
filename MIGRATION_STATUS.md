@@ -1,7 +1,8 @@
 # Migration status and next steps
 
-**Read this first, then `RAG_SERVICE_INSTRUCTIONS.md`** (the original spec, still
-authoritative for scope and working rules). This file records what has actually been
+**Read this first.** The original spec, `RAG_SERVICE_INSTRUCTIONS.md`, is kept locally
+by the owner and is no longer in the repository (gitignored since 2026-11-15); it is still
+authoritative for scope and working rules. This file records what has actually been
 built and verified, the measurements that constrain the remaining work, and what to do
 next. Everything here was verified by running it — nothing is aspirational. Where a
 claim is a measurement, the number is given.
@@ -94,9 +95,9 @@ docker compose down
 ### Phase 0 — extraction (complete)
 
 Extracted from `Notes/rag/05 - RAG Project` with `git subtree split`, preserving all 3
-commits that touched the project. One extra commit carries over
-`RAG_SERVICE_INSTRUCTIONS.md` (it lived untracked at the notes root) and the
-`.env` / `.venv` ignore rules (they lived in the parent `rag/.gitignore`).
+commits that touched the project. One extra commit carried over the original spec,
+`RAG_SERVICE_INSTRUCTIONS.md` (since removed from tracking; the owner keeps it locally),
+and the `.env` / `.venv` ignore rules (they lived in the parent `rag/.gitignore`).
 
 ### Phase 1 — self-contained, configurable, containerised (complete)
 
@@ -552,7 +553,7 @@ resources"* — a new-account restriction); the partial stack was destroyed. The
   → API, the rest → UI. A Route 53 alias points the domain at each new ALB.
   `TRUSTED_PROXY_HOPS=1`. Two ECR repositories. `modules/frontend` (S3 + CloudFront),
   the origin-verify header and the CloudFront prefix list are gone.
-- **Spec deviation:** RAG_SERVICE_INSTRUCTIONS asks for "S3 plus CloudFront for the demo
+- **Spec deviation:** the original spec asks for "S3 plus CloudFront for the demo
   UI" and a "CloudFront URL" output. Replaced by the UI container behind the ALB because
   CloudFront is blocked on this account; the owner chose the domain route. CloudFront can
   return later as a CDN in front of the ALB once the account is verified.

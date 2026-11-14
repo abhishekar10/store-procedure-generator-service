@@ -19,3 +19,6 @@ infra/**/.terraform/
 crash.log
 infra/**/terraform.tfvars
 infra/**/.build/
+
+# The original project brief: kept locally by the owner, not published.
+RAG_SERVICE_INSTRUCTIONS.md
