@@ -6,10 +6,10 @@ built to be one component of a larger system: it has a versioned contract
 (`/v1`, [`openapi.json`](openapi.json)), keeps no state, and depends on
 three swappable interfaces rather than on particular vendors.
 
-What runs today runs locally with `docker compose`. The AWS deployment
-described below (an HTTPS ALB in front of ECS Fargate, at
-`sqlgen.abhishek.gen.in`) is written as Terraform in
-[`infra/`](../infra/README.md), but **not yet applied**.
+It runs locally with `docker compose`, and on AWS as described below (an
+HTTPS ALB in front of ECS Fargate, at `sqlgen.abhishek.gen.in`), from the
+Terraform in [`infra/`](../infra/README.md). The AWS stack is brought up for
+demos and destroyed afterwards, so the URL answers only while it is up.
 
 ## Where it sits
 

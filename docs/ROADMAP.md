@@ -96,7 +96,6 @@ foreign keys that point at real columns).
 
 ## Later, not scheduled
 
-- CI/CD on GitHub Actions (Phase 6 in `MIGRATION_STATUS.md`).
 - Authentication at the gateway, then per-user quotas.
 - CloudFront in front of the ALB as a CDN, once the AWS account is verified
   for it.

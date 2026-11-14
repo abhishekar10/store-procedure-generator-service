@@ -343,7 +343,7 @@ CloudFront and an ALB) so the client is taken from the right
 `X-Forwarded-For` entry; entries before it are client-supplied and ignored.
 
 **Concurrency and shutdown.** Model calls are blocking, so they run off the
-event loop: `/generate` on FastAPI's threadpool, `/generate/stream` on a
+event loop: `/v1/generate` on FastAPI's threadpool, `/v1/generate/stream` on a
 worker thread that also stops early if the client disconnects. `/health`
 stays responsive during generations. On SIGTERM uvicorn waits up to
 `GRACEFUL_SHUTDOWN_S` (110s) for in-flight requests; the ECS task's
@@ -424,7 +424,7 @@ different costs:
   the validator. Needs the vector store (`python -m app.rag.ingest`).
 
 ```bash
-.venv/bin/python -m pytest -q          # 99 offline tests, ~2s
+.venv/bin/python -m pytest -q          # 104 offline tests, ~2s
 .venv/bin/python -m pytest evals/ -q   # 23 live evals, ~1 min
 .venv/bin/ruff check .
 ```

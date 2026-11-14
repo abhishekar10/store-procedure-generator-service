@@ -50,7 +50,8 @@ A generation takes about 15 seconds.
 | [`docs/openapi.json`](docs/openapi.json) | The `/v1` contract, checked in and pinned by a test |
 | [`docs/sample-output/`](docs/sample-output/) | An example generation |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Planned: fixes from testing, MySQL support (v1.1), your own schema with a visual editor (v1.2) |
-| [`infra/`](infra/README.md) | Terraform for AWS and `make up` / `make down` (written, not yet applied) |
+| [`infra/`](infra/README.md) | Terraform for AWS and `make up` / `make down`; the deploy scripts the pipeline shares |
+| [`.github/workflows/`](.github/workflows/) | CI, deploy and evals workflows |
 | [`MIGRATION_STATUS.md`](MIGRATION_STATUS.md) | Working log: what is done, measurements, decisions, what is next |
 | `planning/` | Original design notes, partly superseded -- not the current spec |
 
@@ -72,7 +73,7 @@ A generation takes about 15 seconds.
 
 ```bash
 cd backend
-.venv/bin/python -m pytest -q          # 99 offline tests, ~2s, no API key
+.venv/bin/python -m pytest -q          # 104 offline tests, ~2s, no API key
 .venv/bin/python -m pytest evals/ -q   # 23 live-API evals, ~1 min, costs tokens
 ```
 

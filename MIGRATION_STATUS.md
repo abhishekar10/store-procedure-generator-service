@@ -63,7 +63,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 ```bash
 cd backend
 
-.venv/bin/python -m pytest -q          # 99 offline tests, ~2s, no API key needed
+.venv/bin/python -m pytest -q          # 104 offline tests, ~2s, no API key needed
 .venv/bin/python -m pytest evals/ -q   # 23 live-API evals, ~1 min, costs real tokens
 .venv/bin/python -m app.openapi_export # regenerate docs/openapi.json after an API change
 .venv/bin/ruff check .                 # lint
